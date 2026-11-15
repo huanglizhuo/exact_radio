@@ -1,4 +1,4 @@
 # Any static host that reads `_redirects` (Cloudflare Pages, Netlify):
 # a real file first, then the app's shell for every other path (200, not 404),
 # so /tag/jazz, /country/DE, /now … deep-link straight into the client router.
-/*  /shell.html  200
+/*  /index.html  200
