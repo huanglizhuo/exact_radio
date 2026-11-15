@@ -9,6 +9,7 @@ shape Station
   name: string
   tagline: string
   stream: string
+  fallback: string
   favicon: string
   country: string
   countryCode: string
@@ -131,6 +132,7 @@ component App
   state spinToLat = 26
   state spinToLon = 12
   state skips = 0
+  state triedFallback = false
   state lang = ""
   state langName = ""
   state codec = ""
@@ -158,6 +160,16 @@ component App
   derive tagBroken = failed(tagList) and tagList.length == 0
   derive countryBroken = failed(countryList) and countryList.length == 0
   derive busy = tuning or spinning
+  derive curStream = match current { case some(s) => (triedFallback and s.fallback != "" ? s.fallback : s.stream), case none => "" }
+  derive errorHint = (errorCode == "network"
+    ? "这台连不上，可能是地区限制或地址失效"
+    : errorCode == "decode"
+    ? "这台用了当前浏览器不支持的编码（多为 HLS）"
+    : errorCode == "src-not-supported"
+    ? "这个地址不是音频流"
+    : errorCode == "not-allowed"
+    ? "被浏览器拦住了，点一下播放键再试"
+    : "这一台暂时播不出来")
   derive areaOpen = areaMode != ""
   derive areaAsking = areaMode == "ask"
   derive areaBusy = areaOpen and settleRev > 0 and pending(nearby)
@@ -283,6 +295,7 @@ component App
     status = "loading"
     errorCode = ""
     skips = 0
+    triedFallback = false
     areaMode = ""
     send logged = pushRecent(s)
 
@@ -309,9 +322,13 @@ component App
   action loaded
 
   action failed(code: string)
+    let fallbackReady = match current { case some(s) => (not triedFallback) and s.fallback != "", case none => false }
     status = "failed"
     errorCode = code
-    if skips < 2
+    if fallbackReady
+      triedFallback = true
+      status = "loading"
+    else if skips < 2
       skips = skips + 1
 
   action autoSkip
@@ -323,6 +340,7 @@ component App
     errorCode = ""
     status = "loading"
     wantPlay = true
+    triedFallback = false
 
   action expand
     areaMode = ""
@@ -362,6 +380,7 @@ component App
     tuning = false
 
   action nextStation
+    triedFallback = false
     match current
       case some(s)
         play(s)
@@ -528,7 +547,7 @@ component App
       if hasCurrent
         match current
           case some(s)
-            audio src=s.stream paused=(not wantPlay) volume=volume
+            audio src=curStream paused=(not wantPlay) volume=volume
               metadata=MediaMetadata(title=s.name, artist=s.tagline, album="Airwave", artwork=s.favicon)
               play=started playing=started pause=pausedNow ended=pausedNow
               loadedmetadata=loaded error=failed
@@ -910,70 +929,70 @@ component App
                                     font="-exact-caption2" color=(s.id == currentId ? "AccentColor" : "-exact-tertiary-label")
 
               else if e.name == "nowHome" or e.name == "nowRadio" or e.name == "nowFavorites"
-                column flex=1 position="relative" testId="player-panel" gap=14
-                  padding-left=20 padding-right=20 padding-bottom=20
-                  padding-top="calc(12px + var(--exact-safe-area-inset-top))"
-                  row align-items="center" gap=8
-                    button press=collapse testId="player-collapse" aria-label="收起" appearance="none" padding="6px 4px"
-                      row align-items="center" gap=4
-                        svg width=14 height=14 viewBox="0 0 24 24"
-                          path d="M6 9l6 6 6-6" fill="none" stroke=("AccentColor") stroke-width=2.6 stroke-linecap="round" stroke-linejoin="round"
-                        text "收起" font="-exact-subheadline" color="AccentColor"
-                    view flex=1
-                    text "正在播放" font="-exact-subheadline" font-weight=600
-                    view flex=1
-                    button press=stopPlayback testId="player-stop" aria-label="关闭" appearance="none" padding=0
-                      column width=40 height=40 border-radius=20 align-items="center" justify-content="center"
-                        background-color="-exact-secondary-background"
-                        image "symbol:close" width=15 height=15 color="-exact-secondary-label"
-                  column flex=1 min-height=0 align-items="center" justify-content="center" gap=16
-                    if curFavicon != ""
-                      image curFavicon width=280 height=280 border-radius=20 box-shadow="0 18px 40px rgba(8, 16, 30, 0.22)"
-                    else
-                      view width=280 height=280 border-radius=20 background-color="-exact-tertiary-background"
-                        align-items="center" justify-content="center" box-shadow="0 18px 40px rgba(8, 16, 30, 0.22)"
-                        image "symbol:radio" width=64 height=64 color="-exact-secondary-label"
-                    column gap=6 align-items="center"
-                      text curName font="-exact-title2" font-weight=700 text-align="center" line-clamp=2 testId="panel-name"
-                      text curTagline font="-exact-footnote" color="-exact-secondary-label" text-align="center" line-clamp=1
-                      row gap=8 align-items="center"
-                        if wantPlay
-                          row padding="2px 7px" border-radius=6 background-color="#E5484D"
-                            text "LIVE" font="-exact-caption2" font-weight=700 color="#FFFFFF"
-                        text curDetail font="-exact-caption2" color="-exact-secondary-label"
-                  if failedPlayer
+                column flex=1 position="relative" justify-content="flex-end" press=collapse testId="player-scrim"
+                  column box-sizing="border-box" width="100%" max-height="94%" gap=14
+                    press=noop testId="player-panel" background-color="-exact-background"
+                    border-top-left-radius=28 border-top-right-radius=28
+                    box-shadow="0 -18px 44px rgba(8, 16, 30, 0.16)"
+                    padding-left=20 padding-right=20 padding-bottom=20
+                    padding-top="calc(12px + var(--exact-safe-area-inset-top))"
                     row align-items="center" gap=8
-                      image "symbol:alert" width=16 height=16 color="-exact-system-red"
-                      text "这一台连不上" font="-exact-footnote" color="-exact-system-red" flex=1 testId="player-error"
-                      button press=retry testId="player-retry" "重试"
-                      button press=nextStation testId="player-next-2" "换一台"
-                  row align-items="center" justify-content="center" gap=20 width="100%"
-                    button press=saveCurrent testId="panel-save" aria-label="收藏" appearance="none" padding=0
-                      view width=56 height=56 position="relative"
-                        view position="absolute" inset=0 border-radius=28 background-color="-exact-secondary-background"
-                        image (saved(favs, currentId) ? "symbol:star-fill" : "symbol:star") width=22 height=22
-                          position="absolute" left=17 top=17 color="-exact-system-yellow"
-                    button press=togglePlay testId="panel-toggle" aria-label="播放" appearance="none" padding=0
-                      view width=56 height=56 position="relative"
-                        view position="absolute" inset=0 border-radius=28
-                          background-color=(busy ? "-exact-secondary-background" : "AccentColor")
-                        image (busy ? "symbol:circle" : wantPlay ? "symbol:pause" : "symbol:play") width=24 height=24
-                          position="absolute" left=16 top=16 color=(busy ? "-exact-secondary-label" : "#FFFFFF")
-                    button press=tune testId="panel-next" aria-label="下一个电台" appearance="none" padding=0
-                      column width=56 height=56 border-radius=28 align-items="center" justify-content="center"
-                        background-color="-exact-secondary-background"
-                        if busy
-                          image "symbol:circle" width=22 height=22 color="AccentColor"
-                            animation="pulse 1s ease-in-out infinite"
-                        else
-                          svg width=22 height=22 viewBox="0 0 24 24"
-                            path d="M5 5l7 7-7 7" fill="none" stroke="AccentColor" stroke-width=2.4 stroke-linecap="round"
-                            path d="M12 5l7 7-7 7" fill="none" stroke="AccentColor" stroke-width=2.4 stroke-linecap="round"
-                  column gap=8
-                    row align-items="center" gap=10
-                      button press=setVolume(0) aria-label="静音" appearance="none" padding=2 testId="panel-mute"
-                        image (volume > 0 ? "symbol:speaker" : "symbol:speaker-mute") width=16 height=16 color="-exact-secondary-label"
-                      input type="range" value=volume input=setVolume min=0 max=1 step=0.05 flex=1 testId="panel-volume"
+                      button press=collapse testId="player-collapse" aria-label="收起" appearance="none" padding="6px 4px"
+                        row align-items="center" gap=4
+                          svg width=14 height=14 viewBox="0 0 24 24"
+                            path d="M6 9l6 6 6-6" fill="none" stroke=("AccentColor") stroke-width=2.6 stroke-linecap="round" stroke-linejoin="round"
+                          text "收起" font="-exact-subheadline" color="AccentColor"
+                      view flex=1
+                      text "正在播放" font="-exact-subheadline" font-weight=600
+                      view flex=1
+                    column flex=1 min-height=0 align-items="center" justify-content="center" gap=16
+                      if curFavicon != ""
+                        image curFavicon width=280 height=280 border-radius=20 box-shadow="0 18px 40px rgba(8, 16, 30, 0.22)"
+                      else
+                        view width=280 height=280 border-radius=20 background-color="-exact-tertiary-background"
+                          align-items="center" justify-content="center" box-shadow="0 18px 40px rgba(8, 16, 30, 0.22)"
+                          image "symbol:radio" width=64 height=64 color="-exact-secondary-label"
+                      column gap=6 align-items="center"
+                        text curName font="-exact-title2" font-weight=700 text-align="center" line-clamp=2 testId="panel-name"
+                        text curTagline font="-exact-footnote" color="-exact-secondary-label" text-align="center" line-clamp=1
+                        row gap=8 align-items="center"
+                          if wantPlay
+                            row padding="2px 7px" border-radius=6 background-color="#E5484D"
+                              text "LIVE" font="-exact-caption2" font-weight=700 color="#FFFFFF"
+                          text curDetail font="-exact-caption2" color="-exact-secondary-label"
+                    if failedPlayer
+                      row align-items="center" gap=8
+                        image "symbol:alert" width=16 height=16 color="-exact-system-red"
+                        text errorHint font="-exact-footnote" color="-exact-system-red" flex=1 testId="player-error"
+                        button press=retry testId="player-retry" "重试"
+                        button press=nextStation testId="player-next-2" "换一台"
+                    row align-items="center" justify-content="center" gap=20 width="100%"
+                      button press=saveCurrent testId="panel-save" aria-label="收藏" appearance="none" padding=0
+                        view width=56 height=56 position="relative"
+                          view position="absolute" inset=0 border-radius=28 background-color="-exact-secondary-background"
+                          image (saved(favs, currentId) ? "symbol:star-fill" : "symbol:star") width=22 height=22
+                            position="absolute" left=17 top=17 color="-exact-system-yellow"
+                      button press=togglePlay testId="panel-toggle" aria-label="播放" appearance="none" padding=0
+                        view width=56 height=56 position="relative"
+                          view position="absolute" inset=0 border-radius=28
+                            background-color=(busy ? "-exact-secondary-background" : "AccentColor")
+                          image (busy ? "symbol:circle" : wantPlay ? "symbol:pause" : "symbol:play") width=24 height=24
+                            position="absolute" left=16 top=16 color=(busy ? "-exact-secondary-label" : "#FFFFFF")
+                      button press=tune testId="panel-next" aria-label="下一个电台" appearance="none" padding=0
+                        column width=56 height=56 border-radius=28 align-items="center" justify-content="center"
+                          background-color="-exact-secondary-background"
+                          if busy
+                            image "symbol:circle" width=22 height=22 color="AccentColor"
+                              animation="pulse 1s ease-in-out infinite"
+                          else
+                            svg width=22 height=22 viewBox="0 0 24 24"
+                              path d="M5 5l7 7-7 7" fill="none" stroke="AccentColor" stroke-width=2.4 stroke-linecap="round"
+                              path d="M12 5l7 7-7 7" fill="none" stroke="AccentColor" stroke-width=2.4 stroke-linecap="round"
+                    column gap=8
+                      row align-items="center" gap=10
+                        button press=setVolume(0) aria-label="静音" appearance="none" padding=2 testId="panel-mute"
+                          image (volume > 0 ? "symbol:speaker" : "symbol:speaker-mute") width=16 height=16 color="-exact-secondary-label"
+                        input type="range" value=volume input=setVolume min=0 max=1 step=0.05 flex=1 testId="panel-volume"
 
       if (hasCurrent or nav.tab == "radio") and not inNow
         row testId="player-bar" align-items="center" gap=10 padding="6px 10px" min-height=56

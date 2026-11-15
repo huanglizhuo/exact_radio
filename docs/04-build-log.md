@@ -633,3 +633,17 @@ view width=116 height=116 border-radius=14 position="relative" overflow="hidden"
   「这个地址不是音频流」/「被浏览器拦住了，点一下播放键再试」/「这一台暂时播不出来」。
 - 语法坑：`match` 和三元表达式**不能跨行随性折行** —— `derive x = match y { case … }` 要写在一行里，
   长三元要整体用括号包住，否则报 `expected ,` / `the ternary's : is on the next line`。
+
+## 42. 深链 404 回退：删掉多余的 `404.html`
+
+- 现象：`4a3227e` 这次部署之后，`/radio`、`/tag/jazz` 从 200 变成 **404**，而 `/` 正常；同一份 `web/_redirects`（`/*  /index.html  200`）在它之前的两个部署里是好的。
+- 差异只有一个：`scripts/publish-web.sh` 里那句 `cp dist/shell.html dist/404.html`（本意是给 GitHub Pages 这种没有 rewrite 的托管用）。
+  **Cloudflare Pages 看到部署根目录里有 `404.html`，就用它回答所有未命中路径，`_redirects` 的 200 规则被绕过了。**
+- 修法：`404.html` 只在 `plain` / `github` 目标时生成：
+  ```bash
+  case "${1:-}" in
+    plain|github) cp dist/shell.html dist/404.html ;;
+  esac
+  ```
+- 验证：重新发布后 `/`、`/radio`、`/tag/jazz`、`/nope` 全部 200 且返回同一 shell。
+- 教训：Pages 上「SPA 回落」只留一套机制（`_redirects`）；别同时放 `404.html`，两者会打架。

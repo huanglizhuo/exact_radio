@@ -27,6 +27,8 @@ type Station = {
   name: string;
   tagline: string;
   stream: string;
+  /** The plain `url` from the index: tried once if `stream` fails. */
+  fallback: string;
   favicon: string;
   country: string;
   countryCode: string;
@@ -244,6 +246,13 @@ function shortCountry(country: string): string {
   return SHORT_COUNTRY[country] ?? country.replace(/^The\s+/i, '');
 }
 
+// When the index's preferred address fails, the plain `url` sometimes still works.
+function fallbackFor(url: string, stream: string): string {
+  if (!/^https:\/\//i.test(url) || url === stream) return '';
+  if (/\.(?:m3u8|m3u|pls)(?:[?#]|$)/i.test(url)) return '';
+  return url;
+}
+
 function normalize(raw: unknown): Station | null {
   if (!raw || typeof raw !== 'object') return null;
   const row = raw as Record<string, unknown>;
@@ -252,6 +261,10 @@ function normalize(raw: unknown): Station | null {
   const stream = asString(row.url_resolved) || asString(row.url);
   if (!id || !/^https:\/\//i.test(stream)) return null;
   if (asNumber(row.hls) !== 0) return null; // HLS: Apple plays it, a browser's <audio> does not
+  // The index often says hls=0 for a .m3u8 anyway, and a playlist file is never audio:
+  // both are unplayable in <audio> on Android and in every browser but Safari.
+  if (/\.m3u8(?:[?#]|$)/i.test(stream)) return null;
+  if (/\.(?:m3u|pls)(?:[?#]|$)/i.test(stream)) return null;
   const favicon = asString(row.favicon);
   const tags = asString(row.tags)
     .split(',')
@@ -267,6 +280,7 @@ function normalize(raw: unknown): Station | null {
     name: cleanName(asString(row.name), hostOf(stream)),
     tagline: [country, tags.slice(0, 2).join(' · ')].filter((part) => part.length > 0).join(' · '),
     stream,
+    fallback: fallbackFor(asString(row.url), stream),
     favicon: /^https:\/\//i.test(favicon) ? favicon : '',
     country,
     countryCode: asString(row.countrycode),
@@ -312,6 +326,7 @@ async function readStations(storage: Storage, path: string): Promise<Station[]> 
       frequency: Number.isFinite(station.frequency) ? station.frequency : freqOf(station.id),
       lat: Number.isFinite(station.lat) ? station.lat : 0,
       lon: Number.isFinite(station.lon) ? station.lon : 0,
+      fallback: typeof station.fallback === 'string' ? station.fallback : '',
     }));
   } catch {
     // `ENOENT` the first time, `bake` while the view builds: both are "nothing kept yet".
