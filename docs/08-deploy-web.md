@@ -59,3 +59,31 @@ cd airwave && source ../.tools/env.sh && bun exact.mjs serve dist --port 8791
   **没有 service worker**，所以没有离线能力，Chrome 也不会弹安装条 —— 需要离线就自己加一个（`dist` 是普通静态目录，加文件即可）。
 - **缓存**：`app.js` 与 `*-glue-*.js` 名字里带 hash，可以 `immutable` 长缓存；`index.html` / `shell.html` 建议短缓存。
 - **数据**：电台列表来自 `radio-browser.info`（CORS 开放）、底图来自 Esri 瓦片，全部在运行时请求，服务端零依赖。
+
+## 已配置好的：Cloudflare Pages + GitHub 自动部署
+
+- 仓库：https://github.com/huanglizhuo/exact_radio（`main`）。
+- Pages 项目：`airwave`，生产地址 **https://airwave-76y.pages.dev**（以后可绑自定义域名）。
+- 连接方式：Pages 的 Git 集成（Cloudflare 的 GitHub App），**push 到 `main` 就自动部署**。
+- 构建配置（在项目里已经设好）：`build_command` = 空、`root_dir` = 仓库根、`destination_dir` = **`web`**。
+  也就是说 Pages 不做构建，只上传仓库里的 `web/` 目录。
+
+### 为什么构建放在本地
+
+Cloudflare 的构建镜像里有 Bun，但**没有 cargo**；`bun exact.mjs web-build` 会调
+`cargo metadata --locked --offline` 找 wasm arm，于是 CI 里报
+`web build: cargo metadata …: Executable not found in "$PATH": "cargo"`。
+所以流程是：**本地构建 → 把产物提交到 `web/` → push → Pages 自动上传**。
+
+```bash
+./scripts/publish-web.sh           # 构建 dist、刷新 web/、把 web/ 加进暂存区
+git commit -m "web: rebuild" && git push origin main
+# 想手动触发一次部署（不推代码）：Pages 项目 → Deployments → Retry/Deploy，或
+npx wrangler pages deploy web --project-name airwave --branch main
+```
+
+### SPA 回落
+
+`web/_redirects` 是 `/*  /index.html  200`。**不要**写 `/shell.html`：Pages 会对 `.html` 目标做
+「pretty URL」308 跳到无扩展名路径，结果把自己跳成死循环（我踩过一次，整站 308 到 `/shell`）。
+`/index.html` 是 Pages 特判的 SPA 写法，深链（`/tag/jazz`、`/country/DE`、`/now`）都能直接进客户端路由。
