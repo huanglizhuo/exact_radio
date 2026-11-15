@@ -2,6 +2,18 @@
 
 一份 Contract 同时出 **Web / iOS / macOS**，数据来自 [radio-browser.info](https://www.radio-browser.info/)（5.2 万个公开电台）。只播 https 流。
 
+## 截图（iOS）
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/images/ios-home.png" width="240" alt="发现：正在流行、按类型、按国家"><br><sub>发现 · 正在流行 / 分类</sub></td>
+    <td align="center"><img src="docs/images/ios-world.jpg" width="240" alt="世界：拖动地图找附近的电台"><br><sub>世界 · 拖动地图选电台</sub></td>
+    <td align="center"><img src="docs/images/ios-player.png" width="240" alt="正在播放：大封面、LIVE、音量、睡眠定时"><br><sub>正在播放 · sheet</sub></td>
+  </tr>
+</table>
+
+在线版：**https://airwave-76y.pages.dev**（Web / iOS / macOS 同一份 Contract）
+
 ## 目录
 
 | 路径 | 内容 |
@@ -29,9 +41,9 @@ bun exact.mjs ios --run    # iOS 模拟器
 
 ## 现在到哪一步
 
-三端都能跑：Web（`bun exact.mjs web-build` → `target/web-dist`，11 个交互测试通过）、macOS（`Airwave.app`，`bun exact.mjs mac --run`）、iOS 模拟器（`bun exact.mjs ios --run`，`agent ios --sim "iPhone 17"`）。UI 已按 [docs/05-ui-redesign.md](docs/05-ui-redesign.md) 重做、并按 [docs/06-hig-review.md](docs/06-hig-review.md) 补上 Liquid Glass（底部导航是浮动玻璃胶囊，内容从栏下滚过）：三个 tab（发现 / 正在播放 / 收藏，启动落在「正在播放」）+ 推入式搜索页+ 推入路由（热门榜 `/popular`、收音机 `/radio`、类型与国家），首页有随机收听 hero、继续收听横滑卡片、带标题的榜单与胶囊分组，播放面板换成「大封面 + LIVE + 三键 + 音量」。已实现：**收音机（模拟调谐盘，转旋钮随机换台）**、热门榜、标签/国家浏览、搜索（350ms 防抖 + 请求竞态保护）、**分页加载（每页 40 条，滚到底自动续、列表下方还有「加载更多」兜底）**、**语言 / 编码筛选**、**播放失败自动换台（最多两次）**、**播放面板是真正的 sheet 路由（`/now`，可下拉关闭）**、**搜索历史（最近 8 条）**、收藏与最近收听（`app:/data` JSON）、点播/暂停/上下台、**音量滑杆**、播放面板、Media Session（锁屏与控制中心元数据）、错误码提示、重试与「换一个」、**1024px 应用图标**。截图在 `.research/shots/`（改版后：Web `g3.png` 首页、`g4.png` 播放面板；iOS `g8.png` 玻璃栏 + 迷你条；macOS `g10.png` 需截窗口才看得到材质）。
+四端都能跑：Web（`bun exact.mjs web-build --out dist`，11 个交互测试通过，已部署到 Cloudflare Pages）、macOS（`Airwave.app`）、iOS 模拟器、Android（真机已装）。UI 按 [docs/05-ui-redesign.md](docs/05-ui-redesign.md) 重做、并按 [docs/06-hig-review.md](docs/06-hig-review.md) 补上 Liquid Glass：三个 tab（**发现 / 世界 / 收藏**）+ 推入式搜索页（语言/编码筛选）+ 推入路由（热门榜 `/popular`、类型与国家）；世界页是 **可拖动、可双指缩放的地图**（松手就列这一带最近的电台，点行才播并飞过去）；播放面板是从底部起的 **sheet 路由**（可下拉、点面板外收起），里面是大封面 + LIVE + 三键 + 音量 + 睡眠定时。已实现：分页加载（每页 40 条，滚到底自动续）、语言/编码筛选、**播放失败先用备用 `url` 重试、再自动连跳 2 台**（`.m3u8/.m3u/.pls` 直接过滤，错误按 network/decode/not-allowed 分文案）、搜索历史、收藏与最近收听（`app:/data` JSON）、Media Session（锁屏与控制中心）、1024px 应用图标。截图在 `.research/shots/`。
 
-未做（P2 之后）：语言/编码筛选、失败流自动跳过（现在是手动「换一个」）、商店截图素材、iOS 真机签名（`DEVELOPMENT_TEAM`）与 Mac 公证（`bun exact.mjs release`）。
+未做（P2 之后）：HLS 流的自研播放（现在只做过滤与提示）、播放列表文件（`.m3u`/`.pls`）的解析、商店截图素材、iOS 真机签名（`DEVELOPMENT_TEAM`）与 Mac 公证（`bun exact.mjs release`）。
 
 ## 三句话结论
 

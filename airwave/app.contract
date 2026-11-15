@@ -930,6 +930,7 @@ component App
 
               else if e.name == "nowHome" or e.name == "nowRadio" or e.name == "nowFavorites"
                 column flex=1 position="relative" justify-content="flex-end" press=collapse testId="player-scrim"
+                  background-color="-exact-grouped-background"
                   column box-sizing="border-box" width="100%" max-height="94%" gap=14
                     press=noop testId="player-panel" background-color="-exact-background"
                     border-top-left-radius=28 border-top-right-radius=28
