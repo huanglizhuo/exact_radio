@@ -602,3 +602,34 @@ view width=116 height=116 border-radius=14 position="relative" overflow="hidden"
 三件容易踩的事：① `dist/.exact-build.json` 不能删（`serve` 靠它认构建）；
 ② `/tag/:tag`、`/country/:code` 是无界动态路由，预渲染不出来，只能靠 fallback；
 ③ 产物没有 service worker，Chrome 不会给安装条，iOS 靠 `apple-mobile-web-app-capable` 走独立窗口。
+
+## 40. 正在播放面板：去掉关闭键、点外部收起
+
+- close 按钮整颗删掉（收起箭头仍在左上，逻辑不变）。
+- 模态 sheet 路由**不会**因为点背景而关闭（实测 web/iOS 都是），所以自己在路由根上加了一层「scrim」：
+  ```contract
+  column flex=1 position="relative" justify-content="flex-end" press=collapse testId="player-scrim"
+    column box-sizing="border-box" width="100%" max-height="94%" gap=14 press=noop testId="player-panel"
+      background-color="-exact-background" border-top-left-radius=28 border-top-right-radius=28
+      box-shadow="0 -18px 44px rgba(8, 16, 30, 0.16)"
+  ```
+  `press=collapse` 在根上、`press=noop` 在卡片上（`action noop` 早已存在）：点卡片外的空白就收起，
+  点卡片内部不误触。`.max-height="94%"` 留出可点的边距；**不要**给 scrim 加底色 —— iOS 上它会被画进 sheet 里面，
+  变成一条灰带（试过 `rgba(15,23,42,0.28)`，很难看）。
+- 三端验证：web 点顶部空白 → 路由回到 `/`（`state nav.tabs` 的 home 栈只剩一项）；iOS 卡片圆角与投影正常，
+  仍可用系统 sheet 的下拉关闭。
+
+## 41. 播不出来的电台：先过滤、再兜底、最后说人话
+
+- **过滤**（`app.ts` 的 `normalize`）：除了原来的 `hls !== 0`，再加两条——`\.m3u8` 结尾的地址一律丢掉
+  （索引经常把 `.m3u8` 的 `hls` 标成 0），`\.m3u`/`\.pls` 也丢掉（播放列表文件对 `<audio>` 不是音频）。
+  实测 top300 只多掉 1 条，但能避免「点了转圈半天」。
+- **兜底**：`Station` 新增 `fallback`（索引里的原始 `url`，与 `url_resolved` 不同且是 https、且不是播放列表）；
+  `derive curStream = match current { … triedFallback and s.fallback != "" ? s.fallback : s.stream }`，
+  `audio src=curStream`。`failed()` 里先看有没有可换的 fallback：有就 `triedFallback = true; status = "loading"`
+  （换地址重试一次，不计入跳过），没有才走原来的「自动连跳 2 台」。`play`/`retry`/`nextStation` 都会重置这个标志。
+- **说人话**：`derive errorHint` 把 `errorCode` 映射成
+  「这台连不上，可能是地区限制或地址失效」/「这台用了当前浏览器不支持的编码（多为 HLS）」/
+  「这个地址不是音频流」/「被浏览器拦住了，点一下播放键再试」/「这一台暂时播不出来」。
+- 语法坑：`match` 和三元表达式**不能跨行随性折行** —— `derive x = match y { case … }` 要写在一行里，
+  长三元要整体用括号包住，否则报 `expected ,` / `the ternary's : is on the next line`。
