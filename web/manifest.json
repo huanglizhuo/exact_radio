@@ -1,0 +1,17 @@
+{
+  "name": "Airwave",
+  "short_name": "Airwave",
+  "id": "com.lizhuo.airwave",
+  "start_url": "/",
+  "display": "standalone",
+  "theme_color": "#111113",
+  "icons": [
+    {
+      "src": "assets/icon.png",
+      "sizes": "1024x1024",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "lang": "en"
+}

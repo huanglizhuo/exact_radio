@@ -15,3 +15,8 @@ airwave/app.contract.d.ts
 .DS_Store
 *.log
 .env.local
+
+# build caches from the CI attempt
+.exact-sdk/
+
+# web/ is the committed Pages build (see scripts/publish-web.sh)

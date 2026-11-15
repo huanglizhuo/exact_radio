@@ -1,0 +1,64 @@
+{
+  "routes": [
+    {
+      "name": "home",
+      "pattern": "/",
+      "render": "client",
+      "notfound": false
+    },
+    {
+      "name": "tag",
+      "pattern": "/tag/:tag",
+      "render": "client",
+      "notfound": false
+    },
+    {
+      "name": "country",
+      "pattern": "/country/:code",
+      "render": "client",
+      "notfound": false
+    },
+    {
+      "name": "search",
+      "pattern": "/search",
+      "render": "client",
+      "notfound": false
+    },
+    {
+      "name": "nowHome",
+      "pattern": "/now",
+      "render": "client",
+      "notfound": false
+    },
+    {
+      "name": "radio",
+      "pattern": "/radio",
+      "render": "client",
+      "notfound": false
+    },
+    {
+      "name": "nowRadio",
+      "pattern": "/radio/now",
+      "render": "client",
+      "notfound": false
+    },
+    {
+      "name": "favorites",
+      "pattern": "/favorites",
+      "render": "client",
+      "notfound": false
+    },
+    {
+      "name": "nowFavorites",
+      "pattern": "/favorites/now",
+      "render": "client",
+      "notfound": false
+    },
+    {
+      "name": "notfound",
+      "pattern": "",
+      "render": "client",
+      "notfound": true
+    }
+  ]
+}

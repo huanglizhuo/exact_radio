@@ -1,0 +1,32 @@
+{
+  "exactInstall": 1,
+  "app": {
+    "name": "Airwave"
+  },
+  "build": {
+    "id": "47127aab581e7a44ac1d2d108f0d33ad1bb05c1be0c917adac37bbf3115d58cc",
+    "source": null,
+    "dirty": null,
+    "builtAt": null,
+    "mode": "Release build"
+  },
+  "platforms": {
+    "web": {
+      "methods": [
+        {
+          "kind": "browser",
+          "url": "/",
+          "recommended": false,
+          "label": "Open in browser"
+        }
+      ]
+    },
+    "ios": {
+      "methods": []
+    },
+    "macos": {
+      "methods": []
+    }
+  },
+  "reach": null
+}
