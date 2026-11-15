@@ -1,0 +1,604 @@
+# 实现记录（Build log）
+
+记录 Airwave 从脚手架到跑通的过程：环境怎么搭、Contract 的哪些写法是编译器认可的、数据层怎么接、验证到哪一步。
+
+## 1. 环境
+
+沙箱只能写工作区，Exact 的 setup 要往 `~/.cache/exact`、`~/.rustup` 写东西，所以先把工具状态目录全部重定向进仓库：
+
+```sh
+# .tools/env.sh（source 一次即可）
+export WORKSPACE=/Users/lizhuo/owork/e-asr
+export EXACT=$WORKSPACE/.extern/exact        # expo/exact 浅克隆
+export BUN_INSTALL=$WORKSPACE/.tools/bun     # Bun 1.4.4（仓库要求 >=1.4.2）
+export CARGO_HOME=$WORKSPACE/.tools/cargo
+export RUSTUP_HOME=$WORKSPACE/.tools/rustup
+export HOME=$WORKSPACE/.tools/home           # setup 写 ~/.cache/exact 需要
+export CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+```
+
+- 仓库 `rust-toolchain.toml` 固定 1.97.0，本机是 1.97.1；不用覆盖，直接 `rustup toolchain install 1.97.0 --profile minimal --component rustfmt,clippy --target wasm32-unknown-unknown` 装进工作区。
+- app 内 `exact.mjs` 认 `EXACT` 环境变量，所以 SDK 放在 `.extern/exact`、app 放在 `airwave/` 也能解析。
+- `bun exact.mjs setup --check` 无需全绿：web 与 contract 只要求 Bun；iOS 需要 Xcode 27+（本机 27.2 已装）。
+
+## 2. 建 app
+
+```sh
+cd .extern/exact
+bun scripts/exact.mjs new ../airwave --name Airwave --bundle-id com.lizhuo.airwave --with ios
+mv ../airwave /Users/lizhuo/owork/e-asr/airwave
+```
+
+`app.json` 的关键项（用 `.research/app.schema.json` 校对过）：
+
+- `audio_session: "playback"` —— iOS 默认 `ambient` 在静音键开启时不出声，锁屏也不显示 Now Playing。
+- `host.ios.backgroundModes: ["audio"]` —— 后台继续播。
+- `host.macos.window.keepRunning: true` —— ⌘W 关窗继续播，点 Dock 回来。
+- 不写 `appTransportSecurity` —— 只播 https，不去申请 ATS 例外。
+
+## 3. Contract 语法：编译器教我的那些
+
+这些是实际报错逼出来的，写别的 Exact app 也会遇到：
+
+| 现象 | 正确写法 |
+| --- | --- |
+| `resource x = src(a) as shape T[] else empty() when cond` 报 `expected end of line, found when` | `when` 在 `as` 之前：`resource x = src(a) when cond as shape T[] else empty()` |
+| `audio source s.stream` 报 unknown attribute `source` | 属性名是 `src`：`audio src=s.stream` |
+| `lower-route-place`：路由不在导航根下 | 路由节点必须是导航根的子节点，或挂在**被 tab 按钮 `aria-controls` 指到的** `role="tabpanel"` 下 |
+| `section` has no attribute `header` | 小节标题写成 `section` 的子节点 `header` |
+| `symbol` 不是 role | 只认固定角色集（`bun exact.mjs contract vocab symbol`）；`dot.radiowaves…`、`chevron-down`、`magnifyingglass` 都不是，分别用 `radio`、文字按钮、`search` |
+| `answer` 返回 `unknown` 不匹配 `TypeScriptAnswer` | `import type { Answer, Sources } from './app.contract.d.ts'`，`const sources: Sources = {…}`，`export const answer: Answer = (source, args, store, storage, native) => sources[source](args, store, storage, native)` |
+| `storage.fs.readFile()` 当 `Uint8Array` 用 | 它返回 `Promise<ArrayBuffer>`；`atomicWriteFile(path, Uint8Array)` |
+| mutation 的 reply 少字段 | 每个 `mutation … as shape R` 的 source 都要返回完整的 `R` |
+| 条件渲染的覆盖层被别的元素盖住 | DOM 顺序决定层级：覆盖层要放在同层最后（面板从 `main` 子节点挪进内容列末尾后，按钮才点得到） |
+
+其它有用的事实：
+
+- 输入框不会自动提交，要 `submit=commit`；但更稳的是用 gated task 做防抖：
+  `task liveSearch when draft.trim() != applied` + `after(450, commit)`。
+- 键盘步骤的键名不是 `Enter`（driver 报 `unsupported key "Enter"`），所以测试里用 `clock +600` 等防抖，而不是按键。
+- 宽窗口下 tab 自动变成左侧边栏（原生 tab 容器行为），不用自己写响应式。
+
+## 4. 数据层（app.ts）
+
+- 服务器发现：先 `de1`，失败换 `all.api.radio-browser.info`，每次请求带 `Airwave/0.1` User-Agent；`exactTimeout: 8000`。
+- 只要 https 流（`is_https=true` 服务端过滤 + 客户端再校验一次），并排除 `hls=1`（Web 的 `<audio>` 播不了 HLS）。
+- `url_resolved` 优先（playlist 与跳转已解析）。
+- 名字清洗：去掉 `||` 之后的体裁粘连、压空白、超 72 字截断加省略号。
+- 国家名缩写：`The United Kingdom Of Great Britain And Northern Ireland` → `UK`，`The United States Of America` → `USA` 等（榜单里这两个最常出现，一行放不下）。
+- 收藏/最近收听存 `app:/data/*.json`（`fs.read`/`fs.write` grant），最近收听去重后最多 20 条。
+- 每次点播 `fetch /json/url/{uuid}` 计一次 click（radio-browser 唯一的礼节要求）。
+- `bake` 期（构建视图时）没有网络与存储：读文件失败返回空数组，写失败吞掉 `bake` 错误。
+
+## 5. 验证
+
+```sh
+cd airwave
+bun exact.mjs web-build            # 静态站 → target/web-dist
+bun exact.mjs test web             # 4 passed
+bun exact.mjs agent web --storage airwave-dev "clock data" "..."
+bun exact.mjs mac --run
+bun exact.mjs ios --run
+```
+
+- Web：列表、搜索（防抖后提交）、标签/国家路由、收藏落盘、播放面板、Media Session 元数据都已按截图核对（`.research/shots/`）。
+- `state mediaSession` 在点播后为 `playbackState: "playing"`、`actions: ["nexttrack","pause","play","previoustrack"]`、`published: "navigator.mediaSession"`。
+- macOS / iOS 的构建结果见下一节。
+
+## 6. 已知边界（与计划一致）
+
+- http 台不展示（占索引约 35%），也不申请 ATS 例外。
+- HLS 台（约 6–10%）在 Web 上播不了，当前直接从列表剔除。
+- 未做：分页/无限滚动、搜索历史、音量与睡眠定时器、按语言/编码筛选、iCloud 同步。
+
+## 7. 三端构建：让 exact 在这台机器上跑起来
+
+exact 是 pre-1.0、每天在变的框架，`bun exact.mjs mac` / `ios` 在受限环境里各撞了 2–3 个墙，全部在本地 SDK（`.extern/exact`）打补丁解决。**升级 exact 后这些补丁会被覆盖，需要复查。**
+
+| 症状 | 根因 | 补丁 |
+| --- | --- | --- |
+| `swift package … describe` 报 `sandbox-exec: sandbox_apply: Operation not permitted` | SwiftPM 自己再套一层沙箱，被外层沙箱拒绝 | `scripts/app.mjs` 的 describe 与 `host/apple/build.mjs` 的 build/test 命令加 `--disable-sandbox` |
+| `xcrun … metal … unable to open output file '…/ModuleCache/…pcm'` | Metal 前端把模块缓存写到 `$TMPDIR`/用户缓存，落到工作区外 | `canvas/vello/build.rs` 与 `host/apple/svg-filter.mjs` 给 metal 传 `-fmodules-cache-path=<工作区内目录>`（必须是 `=` 连写的单个参数） |
+| `can't find crate for core` / iOS target 缺失 | `.tools/env.sh` 里 `RUSTUP_TOOLCHAIN=stable` 指向没有 iOS target 的 1.100.0，而 SDK 固定 1.97.0 | 环境变量改成 `RUSTUP_TOOLCHAIN=1.97.0` |
+| `agent ios` 报 `Unable to establish FIFO at ~/Library/Developer/CoreSimulator/…` | simctl 要在用户 Library 下建 FIFO | 用完整文件权限运行（本会话 `danger-full-access`） |
+
+`.tools/env.sh` 里另外把 `HOME`、`CARGO_HOME`、`RUSTUP_HOME`、`CLANG_MODULE_CACHE_PATH`、`SWIFT_MODULE_CACHE_PATH`、`TMPDIR` 全部重定向进工作区，否则 setup/构建会去写 `~/.cache`、`~/.cargo`。
+
+构建产物：
+
+- macOS `airwave/target/clients/<hash>/com.lizhuo.airwave/macos/Airwave.app`（ad-hoc 签名，`bun exact.mjs agent macos …` 可直接驱动）
+- iOS 模拟器 `…/ios-simulator/aarch64-apple-ios-sim/embedded/development/standalone/Airwave.app`（`xcrun simctl install/launch`，`agent ios --sim "iPhone 17"` 驱动）
+- Web `target/web-dist`（`bun exact.mjs serve dist` 或任意静态托管）
+
+## 8. 跨端布局：三条端各自教了一课
+
+**（1）tab 栏必须自己画。** `role="tablist"` 交给平台画时，macOS 上图标与文字并排挤在左下角，iOS 上变成悬浮玻璃胶囊、内容从它下面穿过。改成 recipe 里的 app-drawn 变体（`appearance="none"` + 绝对定位 + 自己在按钮里排图标和文字）后三端一致。
+
+**（2）DOM 顺序就是层级。** 播放条与面板都用 `position="absolute"`，谁在后面谁盖住谁。面板最初排在 tab 栏之前，被 tab 栏压在下面（`tap player-save` 报 `button covers its middle`）；移到 `main` 最后一个子节点后就对了。
+
+**（3）iOS 的原生容器会盖住兄弟节点。** `role="tabpanel"` 在 Apple 端是平台视图，把它当兄弟的面板画不出来 —— 面板即使有 400 个节点、`layout` 也能查到尺寸，屏幕上仍是列表。面板必须挂到 `main` 下（tabpanel 的祖先之外）。
+
+**（4）`viewport-fit="cover"` 是 macOS 的雷。** iOS 上不写 cover，`env(safe-area-inset-*)` 全是 0，tab 按钮被压到 17pt、图标被裁；写了 cover，iOS 正常，但 macOS 整窗白屏（数据、布局、tree 都正常，只是画不出来）。最后放弃 cover，改用固定 56pt 的 tab 栏 + 固定 104pt 的播放间隙，三端都能看。面板的顶部留白同理：`env(safe-area-inset-top)` 在面板里解析成 0，直接写 88。
+
+## 9. 当前状态与下一步
+
+- 已验证：三端构建 + 数据加载 + 搜索 + 标签/国家路由 + 收藏落盘 + 播放（Media Session 报告 `playing`，macOS 与 iOS 都能播）+ 播放面板；Web 侧 4 个 `app.test.contract` 用例通过。
+- 下一步（按 `docs/03-plan.md` 的 P2）：列表分页/无限滚动、搜索历史、音量与睡眠定时器、按语言/编码筛选、失败流的自动跳过与重试退避、图标与 App Store 素材、iOS 真机签名（`DEVELOPMENT_TEAM`）与 Mac 公证（`bun exact.mjs release`）。
+
+## 10. 收尾时的布局定稿（写进代码的规则）
+
+- **内容列居中**：每条 route 的 column 是 `position="absolute" inset=0` + `max-width="47.5rem"`（760pt）+ `margin-left/right="auto"` + `width="100%"` + 条件 `padding-bottom`（播放中 104 / 其余 56）。窄窗时 100% 生效，宽窗时居中，三端同一套。
+- **底栏两层都是绝对定位**：tab 栏 `position="absolute" left=0 right=0 bottom=0 height=56 justify-content="center"`，三个按钮 `flex=1 max-width="12rem"`；播放条 `bottom="calc(56px)"`。tab 栏用自绘（`appearance="none"`），不再交给平台。
+- **面板三层**：`column testId="player-panel"`（absolute inset=0，铺满并盖住底栏）→ 内层 `column flex=1 max-width="47.5rem" width="100%" box-sizing="border-box" margin auto`（居中；`box-sizing` 不能少，否则 iOS 上右侧按钮被裁）→ 顶部 `padding-top=88`、底部 `calc(72px + env(safe-area-inset-bottom))`。
+- **面板必须是 `main` 的最后一个子节点**（在 tab 栏之后），否则 iOS 的 tabpanel 原生视图会压在它上面。
+- `max-width` 用 `rem` 写（`47.5rem`、`12rem`），用 px 会触发 `lower-text-px-width` 警告（Dynamic Type 下文字可能溢出）。
+- 还剩 2 条无害警告 `lower-list-beside-fixed`（第 156/162 行的 chips carousel 悬在滚动列表上方），iOS 上列表会从胶囊下面滚过并带模糊边 —— 这是平台原生观感，先留着。
+
+## 11. P2 增量（2026-11-15 第二轮）
+
+- **分页**：`app.ts` 里每个 `(kind, value, query)` 一条 feed，`feed(kind, value, query, want)` 返回累计到 `want` 条的整表；视图侧 `state want = 40`，`action loadMore` 加一页，列表尾部一支「加载更多」。坑：翻页用索引的**原始** offset，而列表里已按「只留 https / 非 HLS / 去重」过滤过，所以 `page.rows.length` 不能拿来判断「没有下一页」——要单独记 `raw`（`pageOf` 返回 `{rows, raw}`），短页才代表到底。
+- **没有无限滚动**：`reachend` 只属于 `virtualized=true` 且「一个直接 `for`」的列表，我们的列表带 section/header，编译期就报 `lower-collection-edge`；`intersect=` 是 Web 专有。三端一致的做法是列表尾部一支显式按钮。
+- **搜索历史**：`app:/data/searches.json`，去重前置、最多 8 条；`commit` 里 `send recorded = pushSearch(applied)`，mutation 声明 `refreshes history`。空查询时把历史做成胶囊，点一下回填并提交。
+- **睡眠定时**：`state sleepLeft`（秒）+ `task sleepTick when sleepLeft > 0` + `every(1000, tickSleep)`；到 0 时 `wantPlay=false`、`status="idle"`、收起面板。注意 action 里的赋值在动作结束才提交，所以判断写 `sleepLeft <= 1`（读到的仍是旧值）。停止/换台时 `sleepLeft = 0`。
+- **音量**：`input type="range" value=volume input=setVolume min=0 max=1 step=0.05` —— range 的 payload 是数字，`setVolume(v)` 直接收。
+- **失败态**：重试旁边加「换一个」（复用 `nextStation`，从最近收听里挑下一个不同的台）。
+- **图标**：`assets/icon.png` 1024×1024，`purpose: "any maskable"`；PIL 画的「电台波」标记（深蓝渐变 + 金色圆点 + 三道弧），Web manifest 与 Apple 端都从这一张取。
+
+## 12. 随机模式：模拟收音机（2026-11-15 第三轮）
+
+用户要的："随机模式，页面是一个模拟收音机的 ui，手动换台随机切换电台"。
+
+- **第四个 tab**：`tab radio "/radio"`，图标 `symbol:radio`（发现页换成 `sparkles`），底部四等分（`max-width="12rem"` + tablist `justify-content="center"`）。
+- **调谐盘用 `svg` 画，指针用 `view` 旋转**：刻度是 `for i in dialTicks` 里的 `g transform=\`rotate(${i * 7.5 - 75} 130 130)\`` + `line`，指针是一支 3×240 的 `view`，靠 `rotate=\`${needleAngle}deg\`` + `transition="rotate 620ms ..."` 转动 —— 只有 `rotate`/`translate`/`scale`/`opacity` 是各端都能动画的属性，`left` 之类不行。指针的转轴在视图中心，所以做成「圆心 → 弧顶」的半支：下半截用一块与盘面同色的 `view` 盖住，再叠一个 28pt 的轴心圆盖住接缝（DOM 顺序 = 图层顺序）。
+- **随机取台**：`app.ts` 的 `randomStation(rev, exclude)` 打 `/json/stations/search?order=random&hidebroken=true&is_https=true&limit=8`，挑一个不等于当前在播的。返回 `{ rev, station }`，`rev` 原样带回。
+- **竞态**：resource 在参数变化后仍持有上一轮的数据，只靠「条件满足就锁台」会在慢网下锁到**上一台**。所以把 `rev` 塞进返回值，`task landing when tuning and pickedRev == dialRev` 才启动，`lockIn` 里再校验一次 `p.rev == dialRev`。
+- **手感**：`tune` 先置 `tuning = true` 并 `dialRev + 1`，指针走 `sweep` 关键帧来回扫、LED 用 `blink` 闪，650ms 后 `lockIn` 落台并开播；6 秒没回音就 `stopTuning`，不让旋钮卡死。
+- **频率**：`freqOf(uuid)` 对 uuid 做 FNV-1a 再映射到 87.5–107.5（0.1 步进），同一台每次都是同一个刻度，指针角度 `(f - 87.5) / 20 * 124 - 62`。
+- **三端对齐**：macOS 的 `secondary-background` 是中性灰、web/iOS 接近白，所以喇叭孔用 `-exact-separator`（两种底色上都看得见）；iOS 的原生 button 不吃 `flex`，所以「换台 / 播放 / 收藏」都改成 `appearance="none"` 自绘按键（`row` + `height=44` + 边框），三端长得一样。
+- 测试：`bun exact.mjs test web` 7 passed（把「三个 tab」改成四个，新增「调谐盘初始待机、点旋钮后 tuning=true / dialRev=1」）。
+
+## 13. 上滑加载：从「按钮」改成 `reachend`（2026-11-15 第四轮）
+
+用户反馈：macOS 上上滑加载更多不工作；并要把 app 改到 iOS 模拟器上跑。
+
+- **为什么之前只有按钮**：`reachend` 只属于 `list virtualized=true` 且**一个直接 `for`** 的列表（`docs/reference.md` "Intersection visibility"、LLP 1010）；我们的列表带 `section`/header，编译期直接报 `lower-collection-edge`，所以 P2 先退成显式按钮。
+- **踩过的坑（别重复）**：试图用 `intersect=` 标记做无限滚动。第一版是 `row height=1 intersect=loadMoreOnEntry intersect-margin="0px 0px 600px 0px"` + `for boundary in [list.length] key=boundary` 重挂（long-lists recipe 里「填满短页」的技巧）——结果**失控**：macOS 上 `discoverList.length` 涨到 560（14 页），web 上撞到我自己写的 400 上限。原因是每次 append 重挂都会重新投递一次 `isIntersecting: true`（布局还没稳，标记在 0,0）。去掉重挂只留 `intersect` 也一样：启动即 400 行。
+- **现在的写法**：三个分页列表（发现 / 标签·国家 / 搜索）都是
+  `list id=\`content-${e.id}\` testId=\`feed-${e.name}\` appearance="none" virtualized=true flex=1 min-height=0 estimated-item-height=64 reachend=loadMore reach-margin="60%"`，**列表只有一个直接 `for`**，行模板单根 `row`（`padding="6px 16px"` + `border-bottom`）。「热门电台」这种小节标题从 `section header` 提到列表外面，变成普通 `text`。
+- **`appearance` 不能写 `auto`**：`appearance="auto" listStyle="plain" virtualized=true` 会报 `lower-grouped-list`（"a grouped list builds every row … it is never `virtualized`"），必须 `appearance="none"`。
+- **按钮留着当兜底**：分页按钮移到列表下方（`load-more-discover` / `load-more-browse` / `load-more-search`），`loadMore` 里已经有 `if want < 400`。
+- **验证**：web 上从列表行起手 `drag 0 -600` 一次就 `40 → 80`；iOS 模拟器 `tap feed-discover drag 0 -400` 连划五次 `40 → 80`（驱动回报 `native="scroll" scrolledBy=[0,400]`）；`#jazz` 标签页同样 `40 → 80` 且 `tagMore` 仍为 true。`bun exact.mjs test web` 7 passed。
+- **驱动的边界**：macOS 上 `tap feed-discover drag …` 只是手势，驱动回报里没有 `scrolledBy`（AppKit 列表的真滚动要靠触控板/滚轮事件），所以 macOS 的 `reachend` 我无法用 `agent` 复现，只能靠真机滚一下确认；web/iOS 两条路径都已实测。
+- **给列表加 `testId`**：`feed-${e.name}`。虚拟化列表的行不在窗口里时驱动抓不到，`tap feed-discover into <rowKey>` 可以按 key 把行带进窗口。
+- **顺手修掉两处 `analyze-read-after-assign`**：`commit` 里 `applied = draft.trim()` 后立刻读 `applied` 去 `pushSearch`、`tickSleep` 里 `sleepLeft = sleepLeft - 1` 后立刻判断 —— 读到的都是动作开始前的值。改成先绑 `let next = …`、再赋值、再用 `next`。现在 `web-build` 的警告只剩 3 条 `lower-list-beside-fixed`（chips 悬在列表上方，iOS 会带模糊边滚过，是平台原生观感）。
+- **跑起来的两个窗口**：macOS `Airwave.app`（`bun exact.mjs mac --run`）与 iOS 模拟器 iPhone 17（`bun exact.mjs ios --run`，截图 `.research/shots/i38.png`）。
+
+## 14. UI/UX 重构（v2）
+
+调研与规格写在 [05-ui-redesign.md](05-ui-redesign.md)。这里只记落地时踩到的点。
+
+- **缩进即结构**：`main` 的直属子节点（迷你条、tab 栏、`audio`、播放面板）少缩进两格就会变成内容列的最后一个子节点 —— 表现是 tab 栏跳到屏幕顶部、内容跑到它下面。改层级一定要整块移动，不要只改缩进里的某一两行。
+- **`spacer` 不是标签**：写 `view flex=1`。`audio` 的属性只有 `src/paused/volume/preload/metadata/play/pause/error/loadedmetadata/previous*/next*`；`seekbackwardOffset` 这类名字不存在，`error=` 接的是无参动作（`error=failed`），错误码从 `state errorCode` 读。
+- **`match` 必须穷尽**：`match current` 少了 `case none` 会报 `contract-match-arms`；给 `case none` 一个 `column height=0` 即可。
+- **`line-clamp` 在属性表里**（u32），列表行截两行用它；`white-space="nowrap"` 只是不换行。
+- **`filter="blur()"` 只有 web 画**：用它做「封面当氛围层」在 macOS/iOS 上会露出未模糊的放大图（macOS 上是一条色带）。跨端一致的做法是中性渐变。
+- **iOS 的 tab 栏画在内容之上**：铺满窗口的播放面板底部要留 76pt，否则睡眠定时那一行被系统栏切掉。
+- 图标按钮要 `aria-label`，否则 `lower-button-unlabelled` 报警（12 条警告里 4 条是这么来的）。
+- 重写后 `bun exact.mjs test web` 9 passed（新增：hero 卡推入 `/radio` 并返回、`查看全部` 推入 `/popular`）。
+
+## 15. Liquid Glass（按 HIG 复核后）
+
+复核报告在 [06-hig-review.md](06-hig-review.md)。实现层面的四条事实：
+
+- **玻璃是功能层的事**：`backgroundMaterial="glass"` 在 iOS 26 是 `UIGlassEffect`、macOS 26 是 `NSGlassEffectView`，网页/Linux 退化成 `backdrop-filter`。取值 `ultra-thin|thin|regular|thick|glass|glass-clear|none`；文本多的表面（迷你条）用 `regular`，浮在内容上的导航用 `glass`。
+- **`backgroundMaterial` 优先于 `backdrop-filter`**：两个都写是安全的 —— Apple 端走材质，网页端走 blur。`backdrop-filter` 只认 `blur()` 与 `saturate()` 两个函数。
+- **macOS 的玻璃只采样父层子树**：玻璃节点必须是被覆盖内容的**直接兄弟**，否则材质里是空的。而且只有 `screenshot <png> window`（截窗口而不是截应用画布）才看得见材质。
+- **`-exact-scroll-edge-effect` 只有 Apple 端实现**：网页构建会打 `style row scroll_edge_effect skipped by the web host: no CSS lowering` 警告，功能无影响，留它是为了 iOS/macOS 的边缘渐隐。
+- 触控目标实测：`layout player-toggle` 从 `32×32` 改到 `44×44` 后达标；tab 按钮 `128×59`。
+
+## 16. 播放面板改 sheet 路由（Contract 的路由模型）
+
+Exact 的路由是「一种路由 = 一条」，名字由 kind 决定（`tab home "/"`、`popular "/popular"`），
+同一个 kind 在别处再写一次会报 `route-duplicate`。所以**没有全局 sheet**：播放面板必须在每个 tab 里各有一条。
+
+```contract
+routes nav
+  tab home "/"
+    …
+    nowHome "/now"
+  tab search "/search"
+    nowSearch "/search/now"
+  tab favorites "/favorites"
+    nowFavorites "/favorites/now"
+```
+
+- 共用一份视图：`else if e.name == "nowHome" or e.name == "nowSearch" or e.name == "nowFavorites"`。
+- 模态标记绑在**每一条路由共用的那列**上，用表达式关掉：
+  `navigationPresentation=(isNow ? "modal" : "")`、`navigationDetent=(isNow ? "large" : "")`；
+  空串表示普通推入（`apps/shared-elements` 里就是这么写的）。
+- 打开是 `go(nav, nav.tab == "search" ? "/search/now" : …)`，关闭是 `back(nav)`；`state expanded` 删掉，
+  它原来承担的「有播放条时为路由多留 64pt」改由 `derive inNow = cur.name == "nowHome" or …` 判断。
+- 三个坑：① 路由 kind 不能叫 `now`（内建函数名，报 `syntax-expected-string`）；
+  ② 路由节点不能嵌在另一条路由节点里（`lower-route-place`），分支里的内容要写成普通容器；
+  ③ sheet 里的内容列 `max-width` 要小于 macOS sheet 的宽度，否则左边被裁（34rem 才合适，47.5rem 会溢出）。
+- 驱动能读到 `presented="sheet"` 与 sheet 的安全区，`tap`/`back` 会自动等 UIKit 完成转场。
+
+## 17. 辅助功能实测（simctl）
+
+```sh
+xcrun simctl ui <udid> appearance dark
+xcrun simctl ui <udid> increase_contrast enabled
+xcrun simctl ui <udid> content_size accessibility-extra-large
+xcrun simctl io <udid> screenshot shot.png
+```
+- Dynamic Type 到 AX 大号时 tab 栏标签溢出：`height=60` 改成 `min-height=60` + `padding="6px 6px"` 后，
+  栏会随字号长高，图标与文字仍居中。
+- `simctl` 没有 reduce_transparency 这个开关，那一项只能真机人工核。
+
+## 18. 子页面统一走系统导航栏（不要再自绘返回）
+
+`docs/contract-for-agents.md:2319-2320` 的规则：**一条路由的第一个子节点如果是 `header`，里面恰好有一个
+`text role="heading"`、其后可有文字/控件**，平台就把整个 `header` 变成导航栏 —— iOS 上是带 liquid glass
+返回胶囊和玻璃按钮的导航栏，Web 上是「← Back + 标题」，macOS 上是窗口工具栏。自绘返回按钮会与它重复。
+
+```contract
+else if e.name == "tag" or e.name == "country"
+  header display="flex" align-items="center" gap=8 padding="8px 16px"
+    text (e.name == "tag" ? `#${e.params.tag}` : e.params.code) role="heading"
+    button press=loadMore aria-label="更多" testId="load-more-browse"
+      display=((e.name == "tag" ? tagMore : countryMore) ? "flex" : "none")
+      text "更多"
+```
+
+踩坑记录：
+- heading 只写 `role="heading"`（不带 `aria-level`）就是**行内标题**；`aria-level=1` 会变成大标题。
+- 导航栏按钮里不要放自绘胶囊（`row` + `backgroundMaterial`），否则整个 `header` 会退回页面内渲染，
+  标题留在栏里、按钮掉到内容区（正好是这次修掉的 bug）。
+- `button` 必须有自己的内容或尺寸，否则报 `lower-zero-size`。
+- `pending()`/`failed()` 只接受**一个资源名**，不能塞三元表达式；用一个 `derive`（`derive tagLoading = pending(tagList) and tagList.length == 0`）再在视图里选。
+
+## 19. 首次请求的 loading 态
+
+列表首屏为空时先判 `pending` 再判 `failed`，最后才是「这里没有电台」：
+
+```contract
+if (e.name == "tag" ? tagList : countryList).length == 0
+  if e.name == "tag" ? tagLoading : countryLoading
+    column flex=1 align-items="center" justify-content="center" gap=12
+      animation="pulse 1.2s ease-in-out infinite"
+      image "symbol:radio" width=30 height=30 color="-exact-secondary-label"
+      text "正在载入电台…" font="-exact-subheadline" color="-exact-secondary-label"
+  else if e.name == "tag" ? tagBroken : countryBroken
+    …
+```
+
+`keyframes pulse` 就是 `from opacity=0.45 / to opacity=1`；`animation=` 可以挂在 `column` 上，整块一起呼吸。
+
+## 20. 去掉搜索 tab
+
+搜索变成首页推入的普通路由（`search "/search"`），首页 header 右侧多一个玻璃圆钮（`open-search`）。
+`useSearch()` 里从 `select(nav, "search")` 改成 `go(nav, "/search")`；`nowSearch` 那条 sheet 路由随之删除，
+`expand` 只剩两个目标（`/now` 与 `/favorites/now`）。测试里的 `tap "tab-search"` 全部换成 `tap "open-search"`。
+
+## 21. 三 tab：发现 / 正在播放 / 收藏（默认落在中间）
+
+- `tab radio "/radio"` 现在是中间那个 tab，也是启动页。默认 tab 由 `task boot when not booted` +
+  `after(1, bootRadio)` 选过去（`nav = select(nav, "radio")`）；**只在 `cur.name == "home"` 时切换**，
+  否则 Web 上直接打开 `/tag/jazz` 这类深链会被拽回首页。
+- 每个 tab 一条 now 路由（`nowHome "/now"`、`nowRadio "/radio/now"`、`nowFavorites "/favorites/now"`），
+  `expand` 用 `nav.tab` 选 URL；迷你播放条在 `nav.tab == "radio"` 时 `display="none"`，
+  因为那一屏本身就是播放界面。
+- 收音机面板重做：外层玻璃卡（`backgroundMaterial="glass"` + `backdrop-filter` + 大圆角 + 投影）里放
+  「FM + 状态灯 + 调谐盘 + 台名 + 频率 + 国家」，盘下只留三颗按钮 —— 收藏（玻璃圆 54）、
+  播放/暂停（强调色圆 78）、换台（玻璃圆 54，等同 `tune`）。去掉了喇叭孔、旋钮、换台/播放文字按钮与提示行。
+- 调谐盘的「屏幕」有自己的底色（`-exact-tertiary-background`），遮住指针下半截的那条 `view` 用同一色，
+  否则在玻璃卡上会看到一条突兀的色带（macOS 上尤其明显）。
+- 玻璃按钮在浅色背景上几乎看不见，给两侧圆钮加了 `-exact-glass-tint="rgba(120, 140, 175, 0.20)"`。
+
+## 22. 发现页瘦身
+
+- 删掉首页的「随机收听」hero 卡与右上角的随机收听圆钮（与「正在播放」tab 重复），只留搜索圆钮。
+- 删掉整条 `popular "/popular"` 路由与 `action openPopular`，「正在流行」回到首页固定 5 条（不再有「查看全部」）。
+- 于是「更多」按钮也跟着没了：列表靠 `reachend=loadMore` 自动续页，tag/country 页只保留标题。
+
+## 23. 地球仪（Radar / Radio Garden 那一路的交互）
+
+- **投影必须在 `app.ts` 里算**：Contract 没有 sin/cos，视图只负责把 `x/y/z` 摆成点。
+  `project(lat, lon, centerLat, centerLon)` 是正交投影（`z > 0` 才在可见半球），
+  `globeView()` 把陆地表和标记点一起投影成一个 `GlobeDot[]`（`k = -1` 是标记）。
+- 陆地数据：Natural Earth 110m land 多边形 → 斐波那契球面撒点 + 点在多边形内 → 450 个点，
+  存成 `land.json`（5.7KB），随 `app.ts` 打进包里，运行时零网络。
+- 拖动用 pointer 事件，不需要额外的手势系统：
+  `pointerdown=globeDown pointermove=globeMove pointerup=globeUp` + `touch-action="none"`；
+  横向改经度（`-dx * 0.45`），纵向改纬度并夹在 ±72°，`wrapLon` 处理跨经线。
+- 松手才查询：`globeUp` 只 `settleRev += 1`，`resource nearby = nearest(…) when settleRev > 0`，
+  `task settle when … and nearby.length > 0` 再 `after(80, playNearby)` —— 拖动过程中一个请求都不发。
+- **`geo_distance` 的单位是米**，不是公里：写 `8000` 只有 8km，几乎必然空结果。现在用
+  `geo_distance: 3000000`（3000km）+ `limit: 40`，拿回来在 `app.ts` 里按结果自带的 `geo_distance` 升序排，
+  再 `toStations()` 过滤，取第一个能播的。
+- 随机换台要能转过去，`randomStation` 必须带 `has_geo_info: 'true'`，否则随机到的台没有坐标、
+  地球不会动。
+- 转动动画是任务驱动的补间：`spinTo(lat, lon)` 记起点终点，`task spinTick when spinning` 每 45ms
+  调 `spinFrame`，14 帧 ease-out（`t = step/14; e = 1-(1-t)^2`），跨经线用 `nearestLon` 选近的那一边。
+- 点数是 450 个绝对定位的小 `view`：拖动时每帧重算并重排。三端都能跑，但这是这个设计的上限；
+  再密就要换成 `canvas` 或贴图。
+
+## 24. 从点阵地球换成真地图（瓦片）
+
+点阵地球只是「示意」：没有海岸线、没有地名、也没法缩放。换成普通的 slippy map —— 一组 256px 瓦片平铺，
+数学仍然全部在 `app.ts`（Contract 没有三角/对数）：
+
+```ts
+lonToX(lon, scale) = (lon + 180) / 360 * scale
+latToY(lat, scale) = (0.5 - ln((1+sin)/(1-sin)) / 4π) * scale     // Web Mercator
+```
+
+`mapView(lat, lon, zoom, markerLat, markerLon)` 返回 `{ tiles: [{k,url,left,top}], markerLeft, markerTop,
+hasMarker, lonPerPx, latPerPx }`；视图只做两件事：`for t in map.tiles` 贴 `image t.url`，和把标记摆在
+`markerLeft/markerTop`。拖动用 `lonPerPx`/`latPerPx` 换算，所以缩放后拖动手感一致。
+
+**瓦片服务的选择**（都要能无 key 直接取图，且允许带归属使用）：
+
+| 服务 | 结果 |
+| --- | --- |
+| CARTO basemaps（`basemaps.cartocdn.com/dark_all/…`） | 2024 起要 API key，返回的是「API KEY REQUIRED」水印图 |
+| OpenStreetMap 标准瓦片 | 可用，浅色，重负载有使用政策限制 |
+| Esri Canvas `World_Dark_Gray_Base` | **采用**：无 key、深灰、带国名标注，和这个深色界面最搭 |
+| Esri `World_Light_Gray_Base` / `World_Imagery` | 也可用，换一行常量即可 |
+| OpenTopoMap | 可用，地形风，太花 |
+
+Esri 的 URL 顺序是 `{z}/{y}/{x}`（先 y 后 x），别写反。归属必须显示：
+`地图 © Esri · HERE · Garmin · OpenStreetMap`（界面上就是地图下方那行小字）。
+
+- 缩放：`state mapZoom`（1–8），两个玻璃圆钮 `zoom-in`/`zoom-out`，`state` 变了 `map` 资源会重算瓦片。
+- 落点：松手 → `nearby` → `playNearby` 播最近的台，并把地图 `spinTo` 到该台坐标（标记落回中心），
+  这样「所选点」与「真正在播的台」不会各在一处。
+- 随机换台同样 `spinTo`，所以地球/地图会滑到新台的位置。
+- 瓦片下载是 `image` 的普通 https 请求，`grants` 里不用额外声明（`image` 不属于 `net.fetch`）。
+
+## 25. 地图铺满整屏
+
+- 这一屏的路由列**不吃 `max-width`、也不留底部 padding**：`max-width=(e.name == "radio" ? "none" : "47.5rem")`、
+  `padding-bottom=(e.name == "radio" ? "0px" : …)`，于是地图铺到窗口四边，浮动的 tab 胶囊直接压在图上。
+- 瓦片层的大小不能问布局要：`app.ts` 里按 **1400×1400 的虚拟盒子**铺瓦片（`MAP_BOX`），视图把这个盒子
+  `position="absolute" left="50%" top="50%" translate="-50% -50%"` 居中、外层 `overflow="hidden"` 裁掉多余部分。
+  `translate` 的写法是 `-50% -50%`（空格分隔，逗号会报 `lower-attr-value`）。
+- 地图上的控件不能靠系统材质：`backgroundMaterial` 在 web 上是另一套观感，所以放大/缩小、底部信息条统一用
+  `background-color="rgba(16, 20, 26, 0.56)"` + `backdrop-filter="blur(26px) saturate(1.3)"`，文字用白色与
+  `rgba(255,255,255,0.72)`，在任何底图上都够对比。
+- 底部信息条 `max-width="36rem"` 居中，宽窗下不会拉成一整条；`bottom=104` 让开那颗浮动 tab 胶囊。
+- 宽窗实测（1100×780）：地图满窗、信息条居中 36rem、缩放钮贴右边缘。
+
+## 26. 地图铺进安全区、统一外观、换台 loading
+
+**铺进安全区**：`-exact-safe-area` 只接受 `none` 或具体边（写 `auto` 会报
+`lower-attr-value: expected text`），而它是路由级的静态属性，没法按路由条件开关。改用文档里的另一条路：
+把这块内容整体往上拉一个安全区高度 —— `radio-face` 上 `margin-top="calc(-1 * var(--exact-safe-area-inset-top))"`。
+`var(--exact-safe-area-inset-*)` 在路由内就是这一屏自己的安全区（状态栏 + 导航栏），比为负正好抵消
+宿主的 clear，于是地图铺到状态栏下面；底边本来就没 padding，自然铺到底。
+
+**统一外观**：之前地图用 Esri 的深灰底图，而整个 app 是浅色 —— 这是唯一一块深色区域，看着像 bug。
+现在 `app.json` 加 `"userInterfaceStyle": "light"` 把 app 钉在浅色，底图也换成浅色的
+`World_Street_Map`（有城市名、有颜色，能看清电台在哪个城市），地图上的玻璃条、缩放钮、文字全部回到浅色一套。
+`status-bar-style="dark-content"` 落在 map 容器上，状态栏文字在浅底图上仍是深色。
+
+**换台 loading**：`derive busy = tuning or spinning` 覆盖「请求中 → 落点 → 滑动」整个过程；
+`radio-next` 加 `disabled=busy`，`busy` 时图标换成会转的 `symbol:refresh`（`keyframes turn` 0→360°，900ms 线性），
+副标题变成「正在换台…」/「正在移过去…」。`tune` 的守卫也从 `not tuning` 改成 `not busy`，
+连点不会堆叠请求。
+
+**百分比居中在 macOS 上不成立**：`left="50%" top="50%"` 配 `translate="-50% -50%"` 在 macOS 上量出来是
+`(-490, -250)` 而不是 `(-150, -310)`，地图只盖住窗口一部分。改成 `margin-left=(0 - map.half)`、
+`margin-top=(0 - map.half)`（`half` 由 `map` 资源返回 `MAP_BOX / 2`），三端都居中。
+
+## 27. 搜索的筛选改成系统菜单 + 空态的坑
+
+**字符串插值只在反引号里**：`title="没有找到「${applied}」"` 是普通字符串，原样显示了 `${applied}`。
+改成 `title=\`没有找到「${applied}」\`` 才对 —— 双引号里没有插值。
+
+**筛选为什么难看**：原来铺了两行胶囊（11 个语言 + 5 个编码），是 Web/Material 的 chip 网格，不是 UIKit 的形状。
+Apple 的对应物分两种：
+
+- **search scopes**（搜索栏下面那一条作用域）——适合「单一维度、互相排斥、选项少」；
+- **pull-down menu / UIMenu** ——适合「若干互斥选项 + 当前值要看得见」。
+
+我们有两个维度（语言、编码），所以采用后者：两个紧凑按钮「语言 …」「编码 …」，
+`popovertarget` 指向 `column popover="auto" role="menu"`，每一行是
+`role="menuitemradio" aria-checked=(…)` —— iOS 上直接变成 UIMenu（带勾选、带分组标题），
+web 上是原生 popover 列表。选中后按钮变成实心强调色胶囊显示当前值，旁边出现「清除」。
+这比 18 个胶囊省掉两行，也符合 HIG「小集合用菜单、当前值要可见」。
+
+按钮上的指示符用 **⌄（`symbol:forward-chevron` 转 90°）**，不是「…」：省略号在 Apple 的语汇里表示
+「打开一个需要继续输入/确认的模态」（例如「更多操作…」），而就地弹出菜单用下拉箭头。
+
+**空态要给出口**：筛完没结果时，空态里多一个「去掉「中文」筛选」按钮，而不是只让用户自己想起清除。
+（顺带把这里的 EmptyState 换成手写的图标 + 标题 + 说明 + 按钮，因为 `EmptyState` 自己会撑满剩余高度，
+把按钮顶到屏幕底部。）
+
+## 28. 一个浮动播放条，三个 tab 共用
+
+- 播放条本来就是 `main` 层的一个绝对定位胶囊（在路由外面），之前只是用
+  `display=(nav.tab == "radio" ? "none" : "flex")` 在世界页藏起来、另画一套大面板。现在删掉藏和那套面板：
+  条件改成 `if (hasCurrent or nav.tab == "radio") and not inNow`，世界页也用它。
+- 世界页没有在播时，播放条里换成「还没在播 / 点右边的箭头，随机开一台」+ 下一台按钮 —— 空着的地图也有入口。
+- 播放条新增 `player-next`（44pt 圆形，⏭ 双箭头，`press=tune`，`busy` 时换旋转的 `symbol:refresh`），
+  三个 tab 上都能随机换台；`player-toggle`、`player-open`（点条子开 sheet）保持原样。
+- 世界页只剩三样浮层：右上缩放钮、左下「提示 / 归属」小胶囊（`bottom=166`，让开播放条），以及整屏地图。
+- 世界页路由的 `padding-bottom` 仍是 0，所以地图铺到最底；播放条浮在上面，跟发现页的位置一致。
+
+## 29. 地图交互：拖动是浏览，点一行才是命令
+
+改之前的三个毛病（都实测过）：没有位移阈值（点一下地图也会换台）、等待 `geo_distance` 的那 1–2 秒完全没反馈、
+结果直接飞走且"附近没台"时静默。现在改成：
+
+**阈值**：`globeMove` 里位移超过 24pt 才把 `dragMoved` 置真；`globeUp` 只在 `dragMoved` 时才记录落点并查询，
+轻点地图什么都不做（不再误换台）。
+
+**落点与半径**：松手记 `pickLat/pickLon`，半径由缩放决定 —— `fn radiusFor(z) = z <= 3 ? 1500 : z == 4 ? 800 :
+z == 5 ? 400 : z == 6 ? 200 : 100`（公里），`nearest` 里再 ×1000 换成米。这样"屏幕里看到多大就搜多大"。
+
+**卡片**：`areaOpen` 时在播放条上方浮一张卡（`bottom=166`、`max-height=42%`、36rem 居中）：
+标题「附近的电台」+ 副标题（`10 个 · 1.5 千公里内 · 按距离`），下面是
+
+- 查询中：`animation="pulse"` 的三行骨架；
+- 有结果：`list` 滚动，每行 = 封面 + 台名 + 简介 + 距离（`distanceKm` 由 `nearest` 从索引的 `geo_distance`
+  换算，索引给的是**米**，除 1000 才是公里），正在播的那行显示「正在播放」；
+- 没结果：「这一带 100 公里内没有登记的电台」+「扩大范围」（半径 ×3）+「回到当前电台」。
+
+**点选**：`playArea(s)` 才播放，随后 `spinTo` 到台的位置并关掉卡片；地图上保留两枚 pin ——
+松手处是空心圆环（`pick-pin`），电台是实心蓝点，中间用 `svg` 的 `line` + `stroke-dasharray="6 7"` 连一条虚线。
+
+这样"你选的位置"和"最近的台在哪、多远"同时可见，也不用再猜为什么拖了没反应。
+
+## 30. 一次误删与重写（教训）
+
+改「无图标占位」时用 `s.index('text s.name …', row_start)` 定位一段行模板，`index` 命中的是**区域列表**里的同名行，
+`s[:row_start] + row + s[row_end:]` 于是把中间约 170 行抹掉了；项目不是 git 仓库，`app.plan` 是二进制、
+`app.plan.map.json` 只有行列号，没有源码 —— 只能整份重写。
+
+重写时确认下来的语法点（都踩过一遍）：
+
+| 想写的 | 正确写法 | 报错 |
+| --- | --- | --- |
+| 记录类型 | `shape X` + 缩进 `a: string`，**不要花括号** | `syntax-expected` |
+| 函数 | `fn f(a: string): string =` 换行缩进函数体 | `expected :/=` |
+| 布尔 | `bool`（不是 `boolean`） | `type-unknown` |
+| 路由所在 | `column navigationKey=…` 必须是导航根的直接子节点，或在被 tab 按钮 `aria-controls` 链到的 `role="tabpanel"`（**带 `id`**）里 | `lower-route-place` |
+| 导航回调 | `navigate=follow` 的 `follow` 要声明 `target: string`，再自己 `go(nav, target)` | `type-handler-payload` |
+| 搜索框 | `input=type`（只改 draft，交给 450ms 的 `liveSearch`）+ `value=draft` | 直接 `commit` 会绕过防抖 |
+| 弹出菜单 | `popovertarget="lang-menu"` + `column popover="auto" role="menu"`；按钮的 `press` 仍需一个存在的 action | `unknown name` |
+
+另外：`if` 分支里不能塞路由节点；`match` 必须写 `case none`；无 favicon 时用灰底 + `symbol:radio` 占位而不是空 `image`。
+
+## 31. 播放面板与地图交互的五处打磨
+
+- **三个按钮居中**：row 上的 `gap` 会让内容靠左，加 `width="100%" justify-content="center"` 才真居中。
+- **切换中的状态**：`derive busy = tuning or spinning`。中间键 busy 时底色换成 `-exact-secondary-background`、
+  图标换成 `symbol:circle`（灰圈＝禁用），右侧「下一个」busy 时显示**空心圆环**表示加载；
+  「旋转箭头」这种 loading 全部删掉（连 `keyframes turn` 一起删），因为它在三端观感不一致。
+- 排查记录：一开始 busy 的下一个按钮画出来是**方块**，试过去掉 `disabled=`、把 `background-color` 放在 `view` 上、
+  把动画从 icon 挪到容器、整颗按钮在 `if busy` 里换一份、svg 换成 image —— 都是方块。
+  真因是**驱动 `tap` 留下的按下高亮**盖在圆上；换个不点它的路径（先在浮动条点 next、再进面板）拍出来就是圆。
+- **拖动时的中心点**：`globe` 上叠一个 `testId="map-center"` 的空心圆（`left/top="50%"` + `margin-left/top=-14`
+  + `border="3px solid rgba(20,60,140,0.55)"`），松手后它变成 `pick-pin`（实线圆环）并开始查询。
+- **区域列表自适应高度**：卡片列去掉 `flex=1`，列表给 `max-height="46%"` —— 3 条结果时卡片就 3 行高，
+  不会撑到大半屏留白。
+- **自动扩大范围**：`task autoWiden when areaOpen and areaEmpty and areaRadius < 6000` → `after(500, widenArea)`，
+  每 500ms 半径 ×3（100 → 300 → 900 → 2700 → 6000），到 6000km 或查到结果为止，不再等用户点按钮。
+
+## 32. 两个遗留：macOS sheet 头部被标题栏吃掉、web 上的箭头
+
+**macOS 的 sheet 头部**：`layout player-panel` 报 `space viewport 241.5,0 617.5×694`，而
+`viewport … safe-area 52 0 0 0` —— 模态路由的内容从 y=0 开始，**上面 52pt 被窗口工具栏盖住**，
+所以「收起 / 正在播放 / 关闭」那一行看不见（节点一直在，只是画在栏下面）。
+修法：给面板列加 `padding-top="calc(12px + var(--exact-safe-area-inset-top))"` ——
+macOS 上这个变量是 52，iOS 的 sheet 里它是 0（sheet 自己已经内缩过），所以两端都正好。
+
+**web 上的箭头不画**：`symbol:forward-chevron` 在 web 上量出来是 0×0（Apple 端正常），
+`rotate="90deg"` 也不对 —— `rotate` 是 f32 角度，要写 `rotate=90`。索性把三处箭头
+（面板的「收起」、搜索页两个筛选按钮）都换成内联 SVG：
+`svg width=14 height=14 viewBox="0 0 24 24"` + `path d="M6 9l6 6 6-6"`，
+`stroke=(颜色)` 可以直接吃角色名（`"AccentColor"`）或三元表达式。三端一致。
+
+## 33. 收窄底部两件套与播放面板的按键组
+
+- 浮动 tab 栏：`max-width` 36rem → **22rem**、高度 60 → 56、圆角 30 → 28，仍然 `left/right=12` + `margin auto` 居中，
+  于是宽窗下是一条居中的小胶囊，手机上两侧留白也够。
+- 浮动播放条同步收到 **22rem**（`bottom` 94 → 90），两者同宽、上下叠放，视觉上成对。
+- 播放面板的按键组：间距 28 → 20、三颗圆钮 64 → 56（圆角 32 → 28，图标 24/26 → 22/24），
+  仍保持 `justify-content="center"`，整组更紧凑也更居中。
+
+## 34. 装到 Android 真机
+
+```bash
+export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"   # 系统 JDK 是 11，Exact 要 17+
+cd airwave && bun exact.mjs android            # 构建 + 安装；--run 顺手拉起
+adb -s <serial> shell am start -n com.lizhuo.airwave/dev.exact.app.MainActivity
+```
+
+- 产物：`target/android/app/outputs/apk/release/app-release.apk`（30MB，versionName 0.1.0 / versionCode 1，
+  minSdk 31 / targetSdk 36），包名 `com.lizhuo.airwave`，启动 Activity 是 **`dev.exact.app.MainActivity`**
+  （不是 `.MainActivity`，写错会 `Error type 3`）。首次构建 ~3 分钟，增量 8 秒。
+- 真机（小米 24129PN74C / `3de8f372`）上验证：地图瓦片、玻璃胶囊 tab 栏与播放条、恢复上次电台且暂停、
+  `discoverList.length == 40`、搜索与收藏页都正常。
+
+两处平台差异（都是 Exact/Android 的既有行为，不是这个 app 的 bug）：
+
+1. **外观跟随设备**：`app.json` 的 `userInterfaceStyle` 只作用于 iOS/macOS/web，schema 原文
+   "Android, Linux and Windows follow the device"。所以系统深色时两条玻璃胶囊会变深灰，而地图仍是浅色底图。
+2. **强调色来自 Material You**：`AccentColor` 落到 Android 是 `colorPrimary`，由壁纸取色（这台机器是棕褐色）。
+   在根上写 `accent-color="#0C7CFF"` 也没能盖掉它 —— 想固定品牌蓝，得改 Android 宿主主题或关掉动态取色。
+
+## 35. 声音消失的根因：重写时漏了 `audio` 元素
+
+`app.contract` 整份重写时把**播放器本身**弄丢了 —— `view` 里没有任何 `audio`，于是 `play()` 只把 `status`
+设成 `"loading"`，之后既没有 `playing` 也没有 `error`，四端全部「没声音」。补回：
+
+```contract
+      if hasCurrent
+        match current
+          case some(s)
+            audio src=s.stream paused=(not wantPlay) volume=volume
+              metadata=MediaMetadata(title=s.name, artist=s.tagline, album="Airwave", artwork=s.favicon)
+              play=started playing=started pause=pausedNow ended=pausedNow
+              loadedmetadata=loaded error=failed nexttrack=nextStation
+          case none
+            view width=0 height=0
+```
+
+两个签名坑：`error=failed`（**不要**写 `error=failed(code)`，`message` 由平台按
+`action failed(message: string)` 注入）；`previoustrack` 没有对应 action，先不绑定。
+
+**Android 仍然没有声音**，但原因不同：`host/android/canvas` 里只有 `sound` 运算（AAudio 短音效）、
+`AudioFocus`、`Tracks` 的**采集**（`AudioSource`），没有 `MediaPlayer`/Media3/ExoPlayer 一类的播放器 ——
+Exact 的 Android 端还没实现 `audio` 元素的长媒体播放。所以那边 `status` 会一直停在 `loading`。
+
+## 36. 双指缩放（pointer 事件自己算）
+
+Contract 没有 pinch 手势原语，只有 `touch-action` 和 `pointerdown/move/up`，但 `PointerEvent` 带 `pointerId`
+（鼠标恒 1，每根手指各自唯一）。于是自己追踪两个触点：
+
+- `state p1id/p2id/p1x/p1y/p2x/p2y/pinchSpan/pinched`；第一根手指按下记 p1 并开始拖动，第二根按下记 p2、
+  记下两点距离平方 `pinchSpan`、`pinched = true`、停掉拖动。
+- `globeMove` 里按 `pointerId` 更新对应点；两点都在时比较距离平方：`span > pinchSpan * 1.8` 就 `mapZoom + 1`，
+  `span * 1.8 < pinchSpan` 就 `mapZoom - 1`，并把基线重置成当前距离（连续捏合就连续分级）。
+- `globeUp(e)` 用 `let wasP1/wasP2/last` 先算出「最后抬起的是哪根」，**再**清 `p1id/p2id` ——
+  因为 action 里的赋值要到动作结束才提交，直接 `if p1id == 0` 会读到旧值（这个坑踩过一次，导致松手不弹卡片）。
+- 捏合结束时 `pinched` 为真，不触发「松手搜索」，避免缩放顺手把电台换了。
+
+## 37. 封面加载失败时的占位
+
+`if favicon != ""` 决定「画图还是画占位」不够：favicon 是个坏 URL（Android 上常见 `unknownIssuer`、
+`DecodeFailed`）时，条件成立、图却画不出来，卡片就留一块空白。改成**占位永远在下面**：
+
+```contract
+view width=116 height=116 border-radius=14 position="relative" overflow="hidden"
+  background-color="-exact-secondary-background"
+  image "symbol:radio" width=34 height=34 position="absolute" left=41 top=41 color="-exact-secondary-label"
+  if s.favicon != ""
+    image s.favicon position="absolute" left=0 top=0 width=116 height=116
+```
+
+图加载成功就盖住占位，失败就露占位。
+
+## 38. 去掉睡眠定时
+
+按需求整块移除，涉及 `app.contract` 六处：`state sleepLeft/sleepChoices`、`derive sleepMinutes`、
+`task sleepTick`（`every(1000, tickSleep)`）、`action sleepFor/sleepOff/tickSleep`、`stopPlayback` 里的
+`sleepLeft = 0`，以及面板里那一行（月亮图标 + 15/30/60 分钟胶囊 / 「还有 N 分钟停止」+ 关闭）。
+面板现在音量滑杆就是最后一行。测试里 `expect state sleepLeft == 0` 一并删掉，改名「the player starts at full volume」。
+
+## 39. Web 发布：静态产物 + 一条 fallback
+
+`bun exact.mjs web-build --out dist` 出的是纯静态站点（3.2MB，`index.html` 136KB + `app.js` 320KB +
+`app.plan` 76KB + `shell.html`/`routes.json`/`manifest.json`/图标/按需加载的 `*-glue*.js`），
+托管只需要一条规则：**有文件发文件，其余页面导航回 `shell.html`（200）**。
+
+- Cloudflare Pages / Netlify：`_redirects` 里 `/*  /shell.html  200`
+- Vercel：`vercel.json` 的 `rewrites`
+- GitHub Pages：`cp shell.html 404.html`
+- nginx：`try_files $uri /shell.html;`
+
+三件容易踩的事：① `dist/.exact-build.json` 不能删（`serve` 靠它认构建）；
+② `/tag/:tag`、`/country/:code` 是无界动态路由，预渲染不出来，只能靠 fallback；
+③ 产物没有 service worker，Chrome 不会给安装条，iOS 靠 `apple-mobile-web-app-capable` 走独立窗口。

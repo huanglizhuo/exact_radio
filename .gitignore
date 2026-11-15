@@ -1,0 +1,17 @@
+# toolchains and SDK checkout (huge, machine-specific)
+.extern/
+.tools/
+.research/
+
+# build output
+airwave/target/
+airwave/dist/
+airwave/dist.*
+airwave/.exact/
+airwave/node_modules/
+airwave/app.contract.d.ts
+
+# local
+.DS_Store
+*.log
+.env.local

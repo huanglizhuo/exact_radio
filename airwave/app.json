@@ -1,0 +1,73 @@
+{
+  "$schema": "../.extern/exact/scripts/app.schema.json",
+  "name": "Airwave",
+  "short_name": "Airwave",
+  "id": "com.lizhuo.airwave",
+  "start_url": "/",
+  "display": "standalone",
+  "theme_color": "#111113",
+  "audio_session": "playback",
+  "app": {
+    "id": "com.lizhuo.airwave",
+    "name": "Airwave"
+  },
+  "host": {
+    "web": {
+      "head": [
+        {
+          "meta": {
+            "name": "apple-mobile-web-app-capable",
+            "content": "yes"
+          }
+        },
+        {
+          "meta": {
+            "name": "apple-mobile-web-app-status-bar-style",
+            "content": "default"
+          }
+        },
+        {
+          "meta": {
+            "name": "apple-mobile-web-app-title",
+            "content": "Airwave"
+          }
+        }
+      ]
+    },
+    "ios": {
+      "minimumOS": "17.0",
+      "deviceFamily": [
+        "iphone",
+        "ipad"
+      ],
+      "backgroundModes": [
+        "audio"
+      ]
+    },
+    "macos": {
+      "window": {
+        "width": 1100,
+        "height": 780,
+        "minWidth": 820,
+        "minHeight": 560,
+        "keepRunning": true
+      }
+    },
+    "android": {}
+  },
+  "deploy": {
+    "store": {
+      "web": "0",
+      "ios": "0"
+    }
+  },
+  "icons": [
+    {
+      "src": "assets/icon.png",
+      "sizes": "1024x1024",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "userInterfaceStyle": "light"
+}

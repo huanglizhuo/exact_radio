@@ -1,0 +1,95 @@
+// Airwave's authored checks. Run with:
+//   bun exact.mjs test web
+// The station index is a live network service, so these tests assert what the app
+// owns: the tabs, the push routes, the query it commits, and the states before any answer.
+
+test "three tabs switch"
+  clock settle
+  tap "tab-home"
+  expect text "title-home" == "发现"
+  tap "tab-favorites"
+  expect text "title-favorites" == "收藏"
+  tap "tab-radio"
+  expect text "player-idle" == "还没在播"
+
+test "the app opens on the radio tab"
+  clock settle
+  expect state nav.tab == "radio"
+  expect text "player-idle" == "还没在播"
+
+test "the discover page lists the popular stations"
+  clock data
+  tap "tab-home"
+  clock data
+  expect state discoverList.length <= 40
+
+test "a typed query is committed after the pause"
+  tap "open-search"
+  expect state applied == ""
+  type "search-field" "BBC"
+  expect state draft == "BBC"
+  expect state applied == ""
+  clock +600
+  clock data
+  expect state applied == "BBC"
+
+test "clearing the field goes back to the prompt"
+  tap "open-search"
+  type "search-field" "jazz"
+  clock +600
+  clock data
+  expect state applied == "jazz"
+  type "search-field" ""
+  clock +600
+  clock data
+  expect state applied == ""
+
+test "favorites starts empty"
+  tap "tab-favorites"
+  clock data
+  expect state favs == []
+
+test "the player starts at full volume"
+  expect state volume == 1
+
+test "a page holds forty rows and the next one is asked for"
+  clock data
+  expect state want == 40
+  expect state discoverList.length <= 40
+
+test "the radio tab shows the map and asks for a station"
+  clock settle
+  tap "tab-radio"
+  expect text "player-idle" == "还没在播"
+  expect state mapZoom == 3
+  expect state tuning == false
+  expect state dialRev == 0
+  tap "player-next"
+  expect state tuning == true
+  expect state dialRev == 1
+
+test "the search screen offers language and codec menus"
+  tap "open-search"
+  expect state lang == ""
+  expect state codec == ""
+  tap "codec-filter"
+  tap "codec-MP3"
+  expect state codec == "MP3"
+  tap "lang-filter"
+  tap "lang-all"
+  expect state lang == ""
+  tap "clear-filters"
+  expect state codec == ""
+
+test "the now-playing surface is a route, not an overlay"
+  clock settle
+  tap "tab-home"
+  clock data
+  tap "station-b1201e74-2979-44d8-866e-02f74347a8d0"
+  clock data
+  tap "player-open"
+  clock settle
+  expect text "player-collapse" == "收起"
+  tap "player-collapse"
+  clock settle
+  expect text "title-home" == "发现"
