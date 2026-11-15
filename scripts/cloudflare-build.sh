@@ -26,4 +26,8 @@ echo "building the web app"
 cd airwave
 EXACT="$SDK_DIR" bun exact.mjs web-build --out dist
 
+# Cloudflare Pages reads `_redirects` from the output directory: file first, then the
+# app's shell for every other page (200), so /tag/jazz and friends deep-link fine.
+cp ../deploy/_redirects dist/_redirects
+
 echo "built: $(du -sh dist | cut -f1) in $(pwd)/dist"
