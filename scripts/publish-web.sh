@@ -15,7 +15,11 @@ bun exact.mjs web-build --out dist
 # NB: keep `.exact-build.json` — `bun exact.mjs serve dist` reads it to know this is a build.
 
 cp "$ROOT/deploy/_redirects" dist/_redirects
-cp dist/shell.html dist/404.html          # GitHub Pages / hosts without rewrites
+# No 404.html in the Pages copy: Cloudflare Pages honours `_redirects`, and a stray
+# 404.html next to it is what made deep links answer 404 after the 4a3227e deploy.
+case "${1:-}" in
+  plain|github) cp dist/shell.html dist/404.html ;;  # hosts without rewrites
+esac
 
 if [ "${1:-}" != "--no-web" ]; then
   rm -rf "$ROOT/web"
