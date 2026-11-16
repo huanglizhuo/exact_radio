@@ -779,3 +779,25 @@ flyTo/restoreLast 先 +1，mapMoved 消费，quiet 时不弹卡不 bump——否
 屏幕内且不与其它图钉重叠的——agent 命中测试比真实浏览器严格）；iOS 模拟器
 红图钉可见、拖动后 autoplay；macOS 真窗口 screencapture 验证（agent macos
 截图全黑仍是工具限制）。三端 APK/app 均带 7,991 台种子构建。
+
+## 48. 去掉「停下自动播最近」：图钉点播是唯一入口
+
+用户：有了图钉点击，去掉地图停止滚动后默认搜索中央位置最近电台的整套逻辑，
+让用户自己点图钉播放。
+
+**删除**（app.contract −170 行）：areaMode/quietMoves/settleRev/autoTune 四个
+state、areaOpen/areaAsking/areaBusy/areaEmpty/askName/askFavicon/askKm 七个
+derive、nearby 资源、autoPick task、closeArea/toggleAutoTune/playNearestNow/
+openAreaList/askPlayNearest/playArea/recenterOnCurrent 七个 action、「附近的
+电台」卡片整套 UI（ask/list 两态 + 骨架屏 + 空态）、右上「自动播放」开关。
+app.ts 删 globeNearest source（nearestIn 仍被 mapPins 用）。onKey 的 Escape
+分支只剩收起面板。
+
+**简化后的语义**：mapMoved 纯同步相机→picks（图钉跟着镜头走，程序化移动也
+一样——quietMoves 不再需要）；flyTo 只改相机。播放入口 = 点图钉
+（mapPicked→pickStation→pickPlay）或右下「随机开一台」（tune）。
+aria-label/hint 文案改「点图钉播放电台」。
+
+**验证**：13/13 测试（settled-map 测试改为断言拖动后 1.5s 仍 idle、hint 文案）；
+agent web：拖动后 status "idle"、currentId ""、无卡片节点，点独居图钉
+f8c657d3 → 播放 "P5 Nonstop Hits"；三端重建 + Android 真机装新 APK。

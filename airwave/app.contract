@@ -89,15 +89,11 @@ component App
   state globeLon = 12
   state mapZoom = 2
   state globeRev = 1
-  state autoTune = true
-  state quietMoves = 0
   state selId = ""
   state playedPick = ""
-  state settleRev = 0
   state pickLat = 0
   state pickLon = 0
   state pickZoom = 2
-  state areaMode = ""
   state restored = false
   state skips = 0
   state autoLeft = 0
@@ -141,13 +137,6 @@ component App
     : errorCode == "not-allowed"
     ? "被浏览器拦住了，点一下播放键再试"
     : "这一台暂时播不出来")
-  derive areaOpen = areaMode != ""
-  derive areaAsking = areaMode == "ask"
-  derive areaBusy = areaOpen and settleRev > 0 and pending(nearby)
-  derive areaEmpty = areaOpen and not pending(nearby) and nearby.length == 0
-  derive askName = match first(nearby) { case some(s) => s.name, case none => "" }
-  derive askFavicon = match first(nearby) { case some(s) => s.favicon, case none => "" }
-  derive askKm = match first(nearby) { case some(s) => s.distanceKm, case none => 0 }
   derive langLabel = lang == "" ? "语言" : langName
   derive globeRefreshing = pending(globeData)
   derive globeOriginLabel = (globeData.origin == "seed" ? "内置数据" : globeData.origin == "cache" ? "已缓存" : globeData.origin == "net" ? "已更新" : "")
@@ -163,7 +152,6 @@ component App
   resource recent = loadRecent() as shape Station[] else empty()
   resource history = searchHistory() as shape string[] else empty()
   resource globeData = globeLoad(globeRev) as shape GlobeData else empty()
-  resource nearby = globeNearest(pickLat, pickLon) when settleRev > 0 as shape Station[] else empty()
   resource pins = mapPins(pickLat, pickLon, pickZoom, globeData.count) as shape MapMarker[] else empty()
   resource pickStation = stationById(selId, globeLat, globeLon) when selId != "" as shape Station else empty()
   resource picked = randomStation(dialRev, currentId, pickLat, pickLon, pickRadius) when dialRev > 0 as shape DialPick[] else empty()
@@ -186,8 +174,6 @@ component App
     after(4000, stopTuning)
   task refreshOnce when booted and globeRev == 1
     after(600, bumpGlobe)
-  task autoPick when areaAsking and autoTune and not pending(nearby) and nearby.length > 0
-    after(350, playNearestNow)
   task pickPlay when selId != "" and selId != playedPick and not pending(pickStation) and pickStation.id != ""
     after(30, playPick)
 
@@ -270,18 +256,12 @@ component App
     status = "loading"
     errorCode = ""
     triedFallback = false
-    areaMode = ""
     send logged = pushRecent(s)
 
   action play(s: Station)
     start(s)
     skips = 0
     autoLeft = 2
-
-  action recenterOnCurrent
-    if hasCurrent
-      flyTo(curLat, curLon)
-    areaMode = ""
 
   action togglePlay
     if not busy
@@ -323,7 +303,6 @@ component App
     triedFallback = false
 
   action expand
-    areaMode = ""
     nav = go(nav, nav.tab == "favorites" ? "/favorites/now" : nav.tab == "radio" ? "/radio/now" : "/now")
 
   action collapse
@@ -402,9 +381,8 @@ component App
           status = "idle"
           globeLat = s.lat
           globeLon = s.lon
-          quietMoves = quietMoves + 1
-          pickLat = 0
-          pickLon = 0
+          pickLat = s.lat
+          pickLon = s.lon
         case none
 
   action mapMoved(c: MapCamera)
@@ -414,11 +392,6 @@ component App
     pickLat = c.latitude
     pickLon = c.longitude
     pickZoom = c.zoom
-    if quietMoves > 0
-      quietMoves = quietMoves - 1
-    else
-      areaMode = "ask"
-      settleRev = settleRev + 1
 
   action mapPicked(id: string)
     selId = id
@@ -428,51 +401,18 @@ component App
     playedPick = selId
 
   action flyTo(lat: number, lon: number)
-    quietMoves = quietMoves + 1
     globeLat = lat
     globeLon = lon
     pickLat = lat
     pickLon = lon
 
-  action closeArea
-    areaMode = ""
-
   action bumpGlobe
     globeRev = globeRev + 1
 
 
-  action toggleAutoTune
-    autoTune = not autoTune
-
-  action playNearestNow
-    match first(nearby)
-      case some(s)
-        playArea(s)
-      case none
-
-  action openAreaList
-    areaMode = "list"
-
-  action askPlayNearest
-    match first(nearby)
-      case some(s)
-        playArea(s)
-      case none
-        areaMode = ""
-
-  action playArea(s: Station)
-    areaMode = ""
-    pickLat = s.lat
-    pickLon = s.lon
-    play(s)
-    if s.lat != 0 or s.lon != 0
-      flyTo(s.lat, s.lon)
-
   action onKey(k: string)
     if k == "Escape"
-      if areaOpen
-        areaMode = ""
-      else if inNow
+      if inNow
         nav = back(nav)
 
   view
@@ -739,13 +679,7 @@ component App
                   exact-map testId="map" width="100%" flex=1 min-height=0
                     latitude=globeLat longitude=globeLon zoomLevel=mapZoom markers=pins selected=selId
                     change=mapPicked moveend=mapMoved
-                    aria-label="世界电台地图；停下的地方自动播放最近的电台"
-                  column position="absolute" right=14 top="calc(14px + var(--exact-safe-area-inset-top))" gap=8 align-items="flex-end"
-                    button press=toggleAutoTune aria-label="停下时自动播放最近的台" testId="auto-tune" appearance="none" padding=0
-                      row align-items="center" height=36 padding="0 12px" border-radius=18
-                        background-color=(autoTune ? "AccentColor" : "rgba(255, 255, 255, 0.86)") backdrop-filter="blur(18px)"
-                        border="1px solid rgba(15, 23, 42, 0.10)"
-                        text "自动播放" font="-exact-caption1" font-weight=600 color=(autoTune ? "#FFFFFF" : "#475569")
+                    aria-label="世界电台地图；点图钉播放电台"
                   row position="absolute" left=14 top="calc(14px + var(--exact-safe-area-inset-top))" gap=6 align-items="center"
                     row align-items="center" gap=8 height=36 padding="0 12px" border-radius=18
                       background-color="rgba(255, 255, 255, 0.86)" backdrop-filter="blur(18px)"
@@ -763,98 +697,9 @@ component App
                         image "symbol:radio" width=16 height=16 color="#2563EB"
                   column position="absolute" left=14 bottom=170 gap=4 align-items="flex-start"
                     if not hasCurrent or busy
-                      text (busy ? "正在换台…" : "拖动地图，松手播最近的台")
+                      text (busy ? "正在换台…" : "点图钉播放电台")
                         font="-exact-caption1" color="#334155" testId="radio-hint"
                         background-color="rgba(255, 255, 255, 0.86)" border-radius=8 padding="3px 8px"
-                  if areaOpen
-                    column position="absolute" left=12 right=12 bottom=166 gap=0
-                      max-width="36rem" margin-left="auto" margin-right="auto" box-sizing="border-box"
-                      background-color="rgba(255, 255, 255, 0.95)" backdrop-filter="blur(26px)"
-                      border-radius=18 box-shadow="0 14px 34px rgba(8, 16, 30, 0.20)" overflow="hidden"
-                      row align-items="center" gap=8 padding="10px 14px"
-                        column flex=1 gap=2 min-width=0
-                          text "附近的电台" font="-exact-subheadline" font-weight=600 testId="area-header"
-                          text (areaBusy ? "正在查看这一带…" : areaEmpty ? (globeData.count == 0 ? "电台库还没就绪" : "这附近没有登记的电台") : `${nearby.length} 台 · 最近 ${askKm} 公里`)
-                            font="-exact-caption2" color="-exact-secondary-label" line-clamp=1 testId="area-sub"
-                        button press=closeArea aria-label="关闭" testId="area-close" appearance="none" padding=6
-                          image "symbol:close" width=14 height=14 color="-exact-secondary-label"
-                      if areaAsking
-                        column gap=12 padding="0 14px 14px"
-                          if areaBusy
-                            row gap=10 align-items="center" animation="pulse 1.2s ease-in-out infinite"
-                              view width=44 height=44 border-radius=10 background-color="-exact-tertiary-background"
-                              column flex=1 gap=6
-                                view height=12 width="70%" border-radius=6 background-color="-exact-tertiary-background"
-                                view height=10 width="45%" border-radius=5 background-color="-exact-tertiary-background"
-                          else if areaEmpty
-                            column gap=10 align-items="center"
-                              text "这附近没有登记的电台" font="-exact-subheadline" font-weight=600
-                              text "把地球转到别的海域，或者回到正在播的台。" font="-exact-caption2" color="-exact-secondary-label" text-align="center"
-                              if hasCurrent
-                                button press=recenterOnCurrent testId="ask-recenter" appearance="none" padding=0
-                                  row height=40 padding="0 14px" border-radius=12 align-items="center" justify-content="center"
-                                    background-color="-exact-tertiary-background"
-                                    text "回到当前电台" font="-exact-subheadline"
-                          else
-                            row gap=10 align-items="center"
-                              if askFavicon != ""
-                                image askFavicon width=44 height=44 border-radius=10
-                              else
-                                view width=44 height=44 border-radius=10 background-color="-exact-tertiary-background"
-                                  align-items="center" justify-content="center"
-                                  image "symbol:radio" width=20 height=20 color="-exact-secondary-label"
-                              column flex=1 gap=2 min-width=0
-                                text askName font="-exact-subheadline" line-clamp=1 testId="ask-name"
-                                text `${askKm} 公里外最近的一台` font="-exact-caption2" color="-exact-secondary-label"
-                            row gap=8 width="100%"
-                              button press=askPlayNearest testId="ask-play" appearance="none" padding=0 flex=1
-                                row height=40 padding="0 14px" border-radius=12 align-items="center" justify-content="center"
-                                  background-color="AccentColor"
-                                  text "开始播放" font="-exact-subheadline" font-weight=600 color="#FFFFFF"
-                              button press=openAreaList testId="ask-list" appearance="none" padding=0
-                                row height=40 padding="0 14px" border-radius=12 align-items="center" justify-content="center"
-                                  background-color="-exact-tertiary-background"
-                                  text "附近全部" font="-exact-subheadline"
-                              button press=closeArea testId="ask-close" appearance="none" padding=0
-                                row height=40 padding="0 14px" border-radius=12 align-items="center" justify-content="center"
-                                  background-color="-exact-tertiary-background"
-                                  text "取消" font="-exact-subheadline"
-                      else
-                        column gap=0
-                          if areaBusy
-                            column gap=10 padding="0 14px 14px" animation="pulse 1.2s ease-in-out infinite"
-                              for i in [0, 1, 2] key=i
-                                row gap=10 align-items="center"
-                                  view width=40 height=40 border-radius=10 background-color="-exact-tertiary-background"
-                                  column flex=1 gap=6
-                                    view height=12 width="65%" border-radius=6 background-color="-exact-tertiary-background"
-                                    view height=10 width="40%" border-radius=5 background-color="-exact-tertiary-background"
-                          else if areaEmpty
-                            column gap=10 padding="0 14px 14px" align-items="center"
-                              text "这附近没有登记的电台" font="-exact-subheadline" font-weight=600
-                              text "把地球转到别的海域，或者回到正在播的台。" font="-exact-caption2" color="-exact-secondary-label" text-align="center"
-                              if hasCurrent
-                                  button press=recenterOnCurrent testId="area-recenter" appearance="none" padding=0
-                                    row height=40 padding="0 14px" border-radius=12 align-items="center" justify-content="center"
-                                      background-color="-exact-tertiary-background"
-                                      text "回到当前电台" font="-exact-subheadline"
-                          else
-                            list max-height="46%"
-                              for s in nearby key=s.id
-                                row press=playArea(s) testId=`area-station-${s.id}` gap=10 align-items="center"
-                                  padding="8px 14px" border-bottom="1px solid -exact-separator"
-                                  if s.favicon != ""
-                                    image s.favicon width=40 height=40 border-radius=10
-                                  else
-                                    view width=40 height=40 border-radius=10 background-color="-exact-tertiary-background"
-                                      align-items="center" justify-content="center"
-                                      image "symbol:radio" width=18 height=18 color="-exact-secondary-label"
-                                  column flex=1 gap=1 min-width=0
-                                    text s.name font="-exact-subheadline" line-clamp=1
-                                    text s.tagline font="-exact-caption2" color="-exact-secondary-label" line-clamp=1
-                                  text (s.id == currentId ? "正在播放" : `${s.distanceKm} 公里`)
-                                    font="-exact-caption2" color=(s.id == currentId ? "AccentColor" : "-exact-tertiary-label")
-
               else if e.name == "nowHome" or e.name == "nowRadio" or e.name == "nowFavorites"
                 column flex=1 position="relative" justify-content="flex-end" press=collapse testId="player-scrim"
                   background-color="-exact-grouped-background"

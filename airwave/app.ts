@@ -559,32 +559,6 @@ const sources: Sources = {
     };
   },
 
-  // The ten nearest stations to where the map settled — the dataset the app
-  // already holds, so this never waits on the network.
-  globeNearest: async ([lat, lon]: [number, number]): Promise<Station[]> => {
-    if (!globeData) return [];
-    const hits = nearestIn(globeData, lat, lon, 10);
-    return hits.map(({ row, km }) => ({
-      id: row[0],
-      name: row[1],
-      tagline: [row[8], row[9]].filter(Boolean).join(' · '),
-      stream: row[2],
-      fallback: '',
-      favicon: row[5],
-      country: row[8],
-      countryCode: row[8],
-      tags: row[9] ? [row[9]] : [],
-      codec: row[6],
-      bitrate: asNumber(row[7]),
-      votes: asNumber(row[10]),
-      clicks: 0,
-      frequency: freqOf(row[0]),
-      lat: asNumber(row[3]),
-      lon: asNumber(row[4]),
-      distanceKm: Math.round(km * 10) / 10,
-    }));
-  },
-
   feed: async ([kind, value, query, want, lang, codec]: [
     string,
     string,

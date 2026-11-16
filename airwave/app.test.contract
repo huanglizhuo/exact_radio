@@ -71,12 +71,13 @@ test "the radio tab shows the map and asks for a station"
   expect state tuning == true
   expect state dialRev == 1
 
-test "a settled map finds its nearest station offline"
+test "the settled map no longer auto-plays; the hint invites pin taps"
   clock settle
   tap "tab-radio"
   clock settle
-  expect state nearby.length == 0
-  expect state settleRev == 0
+  clock +1500
+  expect text "player-idle" == "还没在播"
+  expect text "radio-hint" == "点图钉播放电台"
 
 test "the search screen offers language and codec menus"
   tap "open-search"
