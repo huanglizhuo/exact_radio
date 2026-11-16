@@ -801,3 +801,39 @@ aria-label/hint 文案改「点图钉播放电台」。
 **验证**：13/13 测试（settled-map 测试改为断言拖动后 1.5s 仍 idle、hint 文案）；
 agent web：拖动后 status "idle"、currentId ""、无卡片节点，点独居图钉
 f8c657d3 → 播放 "P5 Nonstop Hits"；三端重建 + Android 真机装新 APK。
+
+## 49. 绿点图钉（默认圆点不显名，选中显名 + 加深 + 1.5 倍 + 脉冲）
+
+用户指令（m09465）：①图钉默认=浅绿圆点、不显示名称；②选中=显示名称+颜色加深+1.5 倍+脉冲动画（live）；③清旧代码。
+
+**四端实现**（前两轮的旧尝试已废弃）：
+
+- **web**（`@exact/maps` web/index.js）：`.marker` 用 `translate(-50%,-50%)` 居中锚定；label 默认
+  `display:none`、`[aria-pressed="true"]` 时显示（白底圆角 chip、11px semibold）；选中态外圈
+  22px 绿环 `animation: exact-map-pulse 1.5s ease-out infinite`（scale .6→1.9 + opacity .9→0）；
+  `pin()` 画 20×20 SVG 圆（r=7.2、白描边 2.6）；`restyle()` 选中 24/16px、`#059669`/`#34d399`。
+- **Apple**（maps/apple/Maps.swift）：**macOS MapKit 不给自绘/子层注解定位**（draw() 探针只渲染出
+  卡在 init frame 位置的一个色块，249 个注解全部没被搬到坐标；frame/bounds 变体、强制布局都无效），
+  而 `image` 属性的注解立刻被正确定位 → 全平台改为 **CoreGraphics 烘焙图片**：`render(selected:title:)`
+  画普通 14pt 浅绿圆 / 选中 21pt 深绿圆 + glow + 右侧白底圆角 chip（CoreText 画台名，chip 在右侧让
+  dot 圆心保持画布垂直中心，`centerOffset` 只补水平偏移）；`setSelected`/`annotation didSet` →
+  `restyle()`。iOS 额外 `configureRing`（CAShapeLayer + CAAnimationGroup 1.5s 无限脉冲）；mac 快照
+  路径动画不可见，用静态 glow 兜底。
+- **Android**（maps/android/Maps.kt）：`dot(selected)` 画 16/24dp×density 位图（白 rim +
+  `#34D399`/`#059669`），markers 重建与 selected 变化时 `setIcon`，选中 `showInfoWindow`（Google
+  Maps marker 不支持自定义连续动画，无脉冲，记档）。
+- **app 侧**：`app.ts` `mapPins` 删 zoom≥5 才带 title 的门槛（名称全程随图钉，地图层默认隐藏）；
+  `app.contract` exact-map `selected=selId` → `selected=currentId`（脉冲跟正在播的台）。死代码扫描
+  （contract 声明 vs 引用、app.ts 函数）无残留。
+
+**验证**：web 13/13；agent web 像素级（250 pins 全 16px、#34d399 中心命中、选中 #059669 148px +
+脉冲环 + 白 chip + status playing）；mac 真窗口 screencapture（134 浅绿采样、10 个点簇散布中欧）；
+iOS agent（7,013 浅绿采样）；Android 构建过、真机未连未装。
+
+**⚠️ SDK 补丁清单**（`bun exact.mjs update` 会覆盖，需复查重打）：除 §0 的三个沙箱/缓存补丁外，
+本节又改了 SDK 的 `packages/maps/`（web/index.js、apple/Maps.swift、android/Maps.kt）——都在
+`.extern/exact`（gitignore），node_modules 是同 inode 硬链接，直接改 .extern 即可双路径生效。
+
+**Swift 教训**：`#if` 不能内联 typealias（要 `#if` 块包两行）；`annotation?.title ?? nil ?? ""`
+报 optional unwrap 错，要 `(annotation?.title ?? nil) ?? ""`；macOS `NSView` 不能 `view.addSublayer`、
+要 `layer?.addSublayer` + `wantsLayer=true`；CTFontCreateUIFontForLanguage 返回可选要给 `??` 兜底。

@@ -504,7 +504,6 @@ const sources: Sources = {
     const { rows, lats, lons } = globeData;
     const radiusKm = 66000 / Math.pow(2, zoom);
     const cap = zoom <= 2 ? 250 : zoom <= 4 ? 400 : 600;
-    const showTitle = zoom >= 5;
     const idx: number[] = [];
     for (let i = 0; i < rows.length; i += 1) {
       if (haversine(lat, lon, lats[i], lons[i]) <= radiusKm) idx.push(i);
@@ -527,7 +526,8 @@ const sources: Sources = {
         id: r[0],
         latitude: asNumber(r[3]),
         longitude: asNumber(r[4]),
-        title: showTitle ? r[1] : null,
+        // names travel with every pin: the map hides them until a pin is selected
+        title: r[1],
       };
     });
   },

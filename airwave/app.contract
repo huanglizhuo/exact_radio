@@ -677,7 +677,7 @@ component App
                 column flex=1 min-height=0 position="relative" testId="radio-face"
                   margin-top="calc(-1 * var(--exact-safe-area-inset-top))"
                   exact-map testId="map" width="100%" flex=1 min-height=0
-                    latitude=globeLat longitude=globeLon zoomLevel=mapZoom markers=pins selected=selId
+                    latitude=globeLat longitude=globeLon zoomLevel=mapZoom markers=pins selected=currentId
                     change=mapPicked moveend=mapMoved
                     aria-label="世界电台地图；点图钉播放电台"
                   row position="absolute" left=14 top="calc(14px + var(--exact-safe-area-inset-top))" gap=6 align-items="center"
