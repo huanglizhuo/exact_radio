@@ -3,8 +3,8 @@
 // radio-browser is an open, non-commercial index of ~52k stations: no key, no account,
 // CORS open. Its house rules ask for an identifiable User-Agent and one `/json/url/{uuid}`
 // per play (which we send from `pushRecent`), and that clients never hard-code one server.
-import type { Answer, Ctx2D, Frame, Sources } from './app.contract.d.ts';
-import { buildDataset, nearestIn, paintGlobe, parseSeed, type Dataset, type SeedRow } from './globe';
+import type { Answer, Sources } from './app.contract.d.ts';
+import { buildDataset, haversine, nearestIn, parseSeed, type Dataset, type SeedRow } from './globe';
 import { GLOBE_SEED } from './data/globe-seed';
 
 const PRIMARY = 'https://de1.api.radio-browser.info';
@@ -50,6 +50,14 @@ type Station = {
 };
 
 /** A stable "dial position" per station, so the radio face reads the same every time. */
+function emptyStation(): Station {
+  return {
+    id: '', name: '', tagline: '', stream: '', fallback: '', favicon: '',
+    country: '', countryCode: '', tags: [], codec: '', bitrate: 0, votes: 0,
+    clicks: 0, frequency: 0, lat: 0, lon: 0, distanceKm: 0,
+  };
+}
+
 function freqOf(id: string): number {
   let hash = 2166136261;
   for (let i = 0; i < id.length; i += 1) {
@@ -484,7 +492,74 @@ const sources: Sources = {
   globeLoad: async ([rev]: [number], _store, storage): Promise<{ rev: number; count: number; origin: string }> =>
     rev <= 1 ? bootGlobe(storage) : fetchGlobe(rev, storage),
 
-  // The ten nearest stations to where the globe settled — the dataset the canvas
+  // The pins a camera at (lat, lon, zoom) should see. The map view owns pan and
+  // zoom now, so this only runs when the camera settles: pick the stations with
+  // the most votes inside the visible band, capped so the web never has to push
+  // thousands of DOM pins. Fewer than a handful in view → widen to nearest-by-
+  // distance so remote areas are still marked.
+  mapPins: async ([lat, lon, zoom, _rev]: [number, number, number, number]): Promise<
+    { id: string; latitude: number; longitude: number; title: string | null }[]
+  > => {
+    if (!globeData) return [];
+    const { rows, lats, lons } = globeData;
+    const radiusKm = 66000 / Math.pow(2, zoom);
+    const cap = zoom <= 2 ? 250 : zoom <= 4 ? 400 : 600;
+    const showTitle = zoom >= 5;
+    const idx: number[] = [];
+    for (let i = 0; i < rows.length; i += 1) {
+      if (haversine(lat, lon, lats[i], lons[i]) <= radiusKm) idx.push(i);
+    }
+    if (idx.length > cap) {
+      // votes are the index's own popularity ranking — keep the loudest ones
+      idx.sort((a, b) => asNumber(rows[b][10]) - asNumber(rows[a][10]));
+      idx.length = cap;
+    } else if (idx.length < 40) {
+      const near = nearestIn(globeData, lat, lon, 40);
+      const seen = new Set(idx);
+      for (const { row } of near) {
+        const j = rows.indexOf(row);
+        if (j >= 0 && !seen.has(j)) { seen.add(j); idx.push(j); }
+      }
+    }
+    return idx.map((i) => {
+      const r = rows[i];
+      return {
+        id: r[0],
+        latitude: asNumber(r[3]),
+        longitude: asNumber(r[4]),
+        title: showTitle ? r[1] : null,
+      };
+    });
+  },
+
+  // A tapped pin, hydrated into a playable Station straight from the dataset —
+  // distance measured from the live camera so the row reads naturally.
+  stationById: async ([id, camLat, camLon]: [string, number, number]): Promise<Station> => {
+    if (!globeData) return emptyStation();
+    const row = globeData.rows.find((r) => r[0] == id);
+    if (!row) return emptyStation();
+    return {
+      id: row[0],
+      name: row[1],
+      tagline: [row[8], row[9]].filter(Boolean).join(' · '),
+      stream: row[2],
+      fallback: '',
+      favicon: row[5],
+      country: row[8],
+      countryCode: row[8],
+      tags: row[9] ? [row[9]] : [],
+      codec: row[6],
+      bitrate: asNumber(row[7]),
+      votes: asNumber(row[10]),
+      clicks: 0,
+      frequency: freqOf(row[0]),
+      lat: asNumber(row[3]),
+      lon: asNumber(row[4]),
+      distanceKm: Math.round(haversine(camLat, camLon, asNumber(row[3]), asNumber(row[4])) * 10) / 10,
+    };
+  },
+
+  // The ten nearest stations to where the map settled — the dataset the app
   // already holds, so this never waits on the network.
   globeNearest: async ([lat, lon]: [number, number]): Promise<Station[]> => {
     if (!globeData) return [];
@@ -608,25 +683,3 @@ const sources: Sources = {
 
 export const answer: Answer = (source, args, store, storage, native) =>
   sources[source](args, store, storage, native);
-
-// ── the globe's canvas surface ───────────────────────────────────────────────
-// Contract hands `draw` the surface's args in the order the view wrote them.
-export const surfaces: Record<string, number> = { globe: 8 };
-
-export function draw(
-  _surface: string,
-  args: unknown[],
-  ctx: unknown,
-  frame: unknown,
-): boolean {
-  const [rev, lat, lon, zoom, curLat, curLon, curId, flags] = args as [
-    number, number, number, number, number, number, string, number,
-  ];
-  return paintGlobe(
-    ctx as Ctx2D,
-    frame as Frame,
-    { rev, lat, lon, zoom, curLat, curLon, curId, flags },
-    globeData,
-    globeLoading,
-  );
-}

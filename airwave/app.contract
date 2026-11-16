@@ -1,5 +1,7 @@
 // Airwave — the engine. app.ts answers what it asks for.
 
+use MapCamera, MapMarker from "@exact/maps"
+
 shape Country
   code: string
   name: string
@@ -61,17 +63,9 @@ fn saved(xs: Station[], id: string): bool =
 fn detailOf(s: Station): string =
   (s.country == "" ? s.codec : `${s.country} · ${s.codec}`) + (s.bitrate > 0 ? ` · ${s.bitrate} kbps` : "")
 
-fn clamp(v: number, lo: number, hi: number): number =
-  v < lo ? lo : v > hi ? hi : v
 
-fn wrapLon(v: number): number =
-  v > 180 ? v - 360 : v < -180 ? v + 360 : v
 
-fn nearestLon(from: number, to: number): number =
-  to - from > 180 ? to - 360 : to - from < -180 ? to + 360 : to
 
-fn stepFor(z: number): number =
-  z <= 1 ? 0.409 : z == 2 ? 0.205 : z == 3 ? 0.102 : z == 4 ? 0.0512 : z == 5 ? 0.0256 : z == 6 ? 0.0128 : 0.0064
 
 fn nearKm(z: number): number =
   z <= 1 ? 3000 : z == 2 ? 1500 : z == 3 ? 800 : z == 4 ? 400 : z == 5 ? 200 : z == 6 ? 100 : 50
@@ -96,31 +90,15 @@ component App
   state mapZoom = 2
   state globeRev = 1
   state autoTune = true
-  state dragging = false
-  state dragX = 0
-  state dragY = 0
-  state dragLon = 12
-  state dragLat = 26
+  state quietMoves = 0
+  state selId = ""
+  state playedPick = ""
   state settleRev = 0
   state pickLat = 0
   state pickLon = 0
+  state pickZoom = 2
   state areaMode = ""
   state restored = false
-  state dragMoved = false
-  state p1id = 0
-  state p2id = 0
-  state p1x = 0
-  state p1y = 0
-  state p2x = 0
-  state p2y = 0
-  state pinchSpan = 0
-  state pinched = false
-  state spinning = false
-  state spinStep = 0
-  state spinFromLat = 26
-  state spinFromLon = 12
-  state spinToLat = 26
-  state spinToLon = 12
   state skips = 0
   state autoLeft = 0
   state triedFallback = false
@@ -152,7 +130,7 @@ component App
   derive discoverLoading = pending(discoverList) and discoverList.length == 0
   derive tagBroken = failed(tagList) and tagList.length == 0
   derive countryBroken = failed(countryList) and countryList.length == 0
-  derive busy = tuning or spinning
+  derive busy = tuning
   derive curStream = match current { case some(s) => (triedFallback and s.fallback != "" ? s.fallback : s.stream), case none => "" }
   derive errorHint = (errorCode == "network"
     ? "这台连不上，可能是地区限制或地址失效"
@@ -171,9 +149,6 @@ component App
   derive askFavicon = match first(nearby) { case some(s) => s.favicon, case none => "" }
   derive askKm = match first(nearby) { case some(s) => s.distanceKm, case none => 0 }
   derive langLabel = lang == "" ? "语言" : langName
-  derive lonStep = stepFor(mapZoom)
-  derive latStep = stepFor(mapZoom)
-  derive globeFlags = (dragging ? 1 : 0) + (areaOpen ? 2 : 0)
   derive globeRefreshing = pending(globeData)
   derive globeOriginLabel = (globeData.origin == "seed" ? "内置数据" : globeData.origin == "cache" ? "已缓存" : globeData.origin == "net" ? "已更新" : "")
   derive pickRadius = nearKm(mapZoom)
@@ -189,6 +164,8 @@ component App
   resource history = searchHistory() as shape string[] else empty()
   resource globeData = globeLoad(globeRev) as shape GlobeData else empty()
   resource nearby = globeNearest(pickLat, pickLon) when settleRev > 0 as shape Station[] else empty()
+  resource pins = mapPins(pickLat, pickLon, pickZoom, globeData.count) as shape MapMarker[] else empty()
+  resource pickStation = stationById(selId, globeLat, globeLon) when selId != "" as shape Station else empty()
   resource picked = randomStation(dialRev, currentId, pickLat, pickLon, pickRadius) when dialRev > 0 as shape DialPick[] else empty()
 
   mutation savedList as shape Reply refreshes favs
@@ -211,8 +188,8 @@ component App
     after(600, bumpGlobe)
   task autoPick when areaAsking and autoTune and not pending(nearby) and nearby.length > 0
     after(350, playNearestNow)
-  task spinTick when spinning
-    every(45, spinFrame)
+  task pickPlay when selId != "" and selId != playedPick and not pending(pickStation) and pickStation.id != ""
+    after(30, playPick)
 
   action pick(name: string)
     nav = select(nav, name)
@@ -303,7 +280,7 @@ component App
 
   action recenterOnCurrent
     if hasCurrent
-      spinTo(curLat, curLon)
+      flyTo(curLat, curLon)
     areaMode = ""
 
   action togglePlay
@@ -375,7 +352,7 @@ component App
           tuning = false
           play(p.station)
           if p.station.lat != 0 or p.station.lon != 0
-            spinTo(p.station.lat, p.station.lon)
+            flyTo(p.station.lat, p.station.lon)
       case none
         tuning = false
 
@@ -425,75 +402,37 @@ component App
           status = "idle"
           globeLat = s.lat
           globeLon = s.lon
+          quietMoves = quietMoves + 1
           pickLat = 0
           pickLon = 0
         case none
 
-  action globeDown(e: PointerEvent)
-    if p1id == 0
-      p1id = e.pointerId
-      p1x = e.offsetX
-      p1y = e.offsetY
-      dragging = true
-      dragMoved = false
-      dragX = e.offsetX
-      dragY = e.offsetY
-      dragLon = globeLon
-      dragLat = globeLat
-    else if p2id == 0
-      p2id = e.pointerId
-      p2x = e.offsetX
-      p2y = e.offsetY
-      let sx = p2x - p1x
-      let sy = p2y - p1y
-      pinchSpan = sx * sx + sy * sy
-      pinched = true
-      dragging = false
+  action mapMoved(c: MapCamera)
+    globeLat = c.latitude
+    globeLon = c.longitude
+    mapZoom = c.zoom
+    pickLat = c.latitude
+    pickLon = c.longitude
+    pickZoom = c.zoom
+    if quietMoves > 0
+      quietMoves = quietMoves - 1
+    else
+      areaMode = "ask"
+      settleRev = settleRev + 1
 
-  action globeMove(e: PointerEvent)
-    if p1id != 0 and e.pointerId == p1id
-      p1x = e.offsetX
-      p1y = e.offsetY
-    if p2id != 0 and e.pointerId == p2id
-      p2x = e.offsetX
-      p2y = e.offsetY
-    if p2id != 0 and pinchSpan > 0
-      let sx = p2x - p1x
-      let sy = p2y - p1y
-      let span = sx * sx + sy * sy
-      if span > pinchSpan * 1.8 and mapZoom < 7
-        mapZoom = mapZoom + 1
-        pinchSpan = span
-      else if span * 1.8 < pinchSpan and mapZoom > 1
-        mapZoom = mapZoom - 1
-        pinchSpan = span
-    else if dragging
-      let dx = e.offsetX - dragX
-      let dy = e.offsetY - dragY
-      if dx > 24 or dx < -24 or dy > 24 or dy < -24
-        dragMoved = true
-      globeLon = wrapLon(dragLon - dx * lonStep)
-      globeLat = clamp(dragLat + dy * latStep, -80, 80)
+  action mapPicked(id: string)
+    selId = id
 
-  action globeUp(e: PointerEvent)
-    let wasP1 = p1id != 0 and e.pointerId == p1id
-    let wasP2 = p2id != 0 and e.pointerId == p2id
-    let last = (wasP1 and p2id == 0) or (wasP2 and p1id == 0)
-    if wasP2
-      p2id = 0
-    if wasP1
-      p1id = 0
-    if last
-      dragging = false
-      if pinched
-        pinched = false
-        dragMoved = false
-      else if dragMoved
-        pickLat = globeLat
-        pickLon = globeLon
-        areaMode = "ask"
-        settleRev = settleRev + 1
-        dragMoved = false
+  action playPick
+    play(pickStation)
+    playedPick = selId
+
+  action flyTo(lat: number, lon: number)
+    quietMoves = quietMoves + 1
+    globeLat = lat
+    globeLon = lon
+    pickLat = lat
+    pickLon = lon
 
   action closeArea
     areaMode = ""
@@ -501,8 +440,6 @@ component App
   action bumpGlobe
     globeRev = globeRev + 1
 
-  action globeWheel(e: WheelEvent)
-    mapZoom = clamp(mapZoom + (e.deltaY > 0 ? -1 : 1), 1, 7)
 
   action toggleAutoTune
     autoTune = not autoTune
@@ -529,32 +466,7 @@ component App
     pickLon = s.lon
     play(s)
     if s.lat != 0 or s.lon != 0
-      spinTo(s.lat, s.lon)
-
-  action zoomIn
-    if mapZoom < 7
-      mapZoom = mapZoom + 1
-
-  action zoomOut
-    if mapZoom > 1
-      mapZoom = mapZoom - 1
-
-  action spinTo(lat: number, lon: number)
-    spinFromLat = globeLat
-    spinFromLon = globeLon
-    spinToLat = lat
-    spinToLon = nearestLon(globeLon, lon)
-    spinStep = 0
-    spinning = true
-
-  action spinFrame
-    spinStep = spinStep + 1
-    let t = spinStep / 14
-    let e = 1 - (1 - t) * (1 - t)
-    globeLon = wrapLon(spinFromLon + (spinToLon - spinFromLon) * e)
-    globeLat = spinFromLat + (spinToLat - spinFromLat) * e
-    if spinStep >= 14
-      spinning = false
+      flyTo(s.lat, s.lon)
 
   action onKey(k: string)
     if k == "Escape"
@@ -824,50 +736,36 @@ component App
               else if e.name == "radio"
                 column flex=1 min-height=0 position="relative" testId="radio-face"
                   margin-top="calc(-1 * var(--exact-safe-area-inset-top))"
-                  view position="absolute" inset=0 testId="globe" background-color="#0B0D14"
-                    status-bar-style="light-content" touch-action="none"
-                    pointerdown=globeDown pointermove=globeMove pointerup=globeUp wheel=globeWheel
-                    canvas surface=globe(globeRev, globeLat, globeLon, mapZoom, curLat, curLon, currentId, globeFlags)
-                      width="100%" height="100%"
+                  exact-map testId="map" width="100%" flex=1 min-height=0
+                    latitude=globeLat longitude=globeLon zoomLevel=mapZoom markers=pins selected=selId
+                    change=mapPicked moveend=mapMoved
+                    aria-label="世界电台地图；停下的地方自动播放最近的电台"
                   column position="absolute" right=14 top="calc(14px + var(--exact-safe-area-inset-top))" gap=8 align-items="flex-end"
-                    button press=zoomIn aria-label="放大" testId="zoom-in" appearance="none" padding=0
-                      row width=44 height=44 border-radius=22 align-items="center" justify-content="center"
-                        background-color="rgba(15, 23, 42, 0.62)" backdrop-filter="blur(18px)"
-                        border="1px solid rgba(148, 163, 184, 0.22)"
-                        image "symbol:add" width=18 height=18 color="#E2E8F0"
-                    button press=zoomOut aria-label="缩小" testId="zoom-out" appearance="none" padding=0
-                      row width=44 height=44 border-radius=22 align-items="center" justify-content="center"
-                        background-color="rgba(15, 23, 42, 0.62)" backdrop-filter="blur(18px)"
-                        border="1px solid rgba(148, 163, 184, 0.22)"
-                        image "symbol:minus" width=18 height=18 color="#E2E8F0"
-                    button press=toggleAutoTune aria-label="松手自动播放最近的台" testId="auto-tune" appearance="none" padding=0
+                    button press=toggleAutoTune aria-label="停下时自动播放最近的台" testId="auto-tune" appearance="none" padding=0
                       row align-items="center" height=36 padding="0 12px" border-radius=18
-                        background-color=(autoTune ? "AccentColor" : "rgba(15, 23, 42, 0.62)")
-                        border="1px solid rgba(148, 163, 184, 0.22)" backdrop-filter="blur(18px)"
-                        text "自动播放" font="-exact-caption1" font-weight=600 color=(autoTune ? "#FFFFFF" : "#CBD5E1")
+                        background-color=(autoTune ? "AccentColor" : "rgba(255, 255, 255, 0.86)") backdrop-filter="blur(18px)"
+                        border="1px solid rgba(15, 23, 42, 0.10)"
+                        text "自动播放" font="-exact-caption1" font-weight=600 color=(autoTune ? "#FFFFFF" : "#475569")
                   row position="absolute" left=14 top="calc(14px + var(--exact-safe-area-inset-top))" gap=6 align-items="center"
                     row align-items="center" gap=8 height=36 padding="0 12px" border-radius=18
-                      background-color="rgba(15, 23, 42, 0.62)" backdrop-filter="blur(18px)"
-                      border="1px solid rgba(148, 163, 184, 0.22)" testId="globe-status"
+                      background-color="rgba(255, 255, 255, 0.86)" backdrop-filter="blur(18px)"
+                      border="1px solid rgba(15, 23, 42, 0.10)" testId="globe-status"
                       if globeRefreshing
-                        text "更新中" font="-exact-caption2" color="#93C5FD" testId="globe-origin"
+                        text "更新中" font="-exact-caption2" color="#2563EB" testId="globe-origin"
                       else
-                        text `${globeData.count} 台` font="-exact-caption1" font-weight=600 color="#E2E8F0"
+                        text `${globeData.count} 台` font="-exact-caption1" font-weight=600 color="#0F172A"
                         if globeOriginLabel != ""
-                          text globeOriginLabel font="-exact-caption2" color="rgba(148, 163, 184, 0.9)" testId="globe-origin"
+                          text globeOriginLabel font="-exact-caption2" color="#64748B" testId="globe-origin"
                     button press=bumpGlobe aria-label="刷新电台库" testId="globe-refresh" appearance="none" padding=0
                       row width=36 height=36 border-radius=18 align-items="center" justify-content="center"
-                        background-color="rgba(15, 23, 42, 0.62)" backdrop-filter="blur(18px)"
-                        border="1px solid rgba(148, 163, 184, 0.22)"
-                        image "symbol:radio" width=16 height=16 color="#93C5FD"
+                        background-color="rgba(255, 255, 255, 0.86)" backdrop-filter="blur(18px)"
+                        border="1px solid rgba(15, 23, 42, 0.10)"
+                        image "symbol:radio" width=16 height=16 color="#2563EB"
                   column position="absolute" left=14 bottom=170 gap=4 align-items="flex-start"
                     if not hasCurrent or busy
-                      text (busy ? (tuning ? "正在换台…" : "正在查看附近…") : "拖动地球，松手播最近的台")
-                        font="-exact-caption1" color="#CBD5E1" testId="radio-hint"
-                        background-color="rgba(15, 23, 42, 0.62)" border-radius=8 padding="3px 8px"
-                    text "电台数据 © radio-browser"
-                      font="-exact-caption2" color="rgba(148, 163, 184, 0.8)" testId="map-credit"
-                      background-color="rgba(15, 23, 42, 0.5)" border-radius=6 padding="2px 6px"
+                      text (busy ? "正在换台…" : "拖动地图，松手播最近的台")
+                        font="-exact-caption1" color="#334155" testId="radio-hint"
+                        background-color="rgba(255, 255, 255, 0.86)" border-radius=8 padding="3px 8px"
                   if areaOpen
                     column position="absolute" left=12 right=12 bottom=166 gap=0
                       max-width="36rem" margin-left="auto" margin-right="auto" box-sizing="border-box"

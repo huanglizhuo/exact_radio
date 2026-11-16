@@ -1,0 +1,15 @@
+{
+  "lockfileVersion": 2,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "airwave",
+      "dependencies": {
+        "@exact/maps": "file:../.extern/exact/packages/maps",
+      },
+    },
+  },
+  "packages": {
+    "@exact/maps": ["@exact/maps@file:../.extern/exact/packages/maps", {}],
+  }
+}

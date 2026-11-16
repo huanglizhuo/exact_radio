@@ -741,3 +741,41 @@ bench（桌面 bun、stub ctx、7,991 点全量）：0.440 → 0.283 ms/帧 JS �
   （日志 `GPU module … missing baked identity`），canvas 全黑；真实启动
   `open Airwave.app` + `screencapture -R` 窗口区域验证渲染正常（dark 80.5%）。
   iOS 驱动模式有 GPU 表面，可照常截图。
+
+## 47. 地球仪换成平台地图：@exact/maps（MapKit / OSM）
+
+用户指出 canvas 自绘地球在放大后拖动仍然卡（第一轮优化后依旧），且 SDK 自带
+`@exact/maps` 包（apps/map-demo 是官方 demo）：**Apple 端 MapKit、web 端
+OpenStreetMap 瓦片、Android 端 Google Maps**。渲染负载全部交还平台，卡顿
+根因（5.5k 可见点逐帧重画）自然消失。
+
+**接入**：`bun exact.mjs add maps` → package.json 依赖 + app.json 配
+`packages: {"@exact/maps": {web: {tiles: OSM 模板, attribution, maxZoom:19}, android:{}}}`。
+合同头部 `use MapCamera, MapMarker from "@exact/maps"`；视图 `exact-map
+latitude/longitude/zoomLevel/markers/selected`，事件 `change`（点图钉，参数
+marker id）与 `moveend`（相机落定，参数 MapCamera）。macOS 需
+`host.macos.minimumOS = "14.0"`（iOS 已是 17）。
+
+**合同侧**：删掉整套手势/spin（globeDown/Move/Up/Wheel、zoomIn/Out、
+spinTo/spinFrame/spinTick、18 个 state）；新增 `mapMoved(c)`（落定→弹附近卡
++bump settleRev）、`mapPicked(id)`+`playPick`（点图钉直接播）、`flyTo(lat,lon)`
+（单次相机变更，动画交给 MapKit）。**quietMoves 计数器**区分程序化移动：
+flyTo/restoreLast 先 +1，mapMoved 消费，quiet 时不弹卡不 bump——否则 MapKit
+连自己动画结束的 regionDidChange 也会当成用户手势。缩放/捏合/归因/指南针
+全部交给平台（web 自带 +/− 按钮，macOS 自带缩放控件）。
+
+**数据侧**（app.ts）：新 source `mapPins(lat,lon,zoom,count)` —— 半径
+66000/2^zoom km 内按 votes 降序取 ≤250/400/600（按 zoom 分档）个 MapMarker，
+不足 40 个补最近 40；zoom≥5 才带 title（低 zoom 不出文字标签）。
+`stationById(id,camLat,camLon)` 把点选的图钉水化成可播 Station。
+**资源链坑**：`resource pins = mapPins(pickLat, pickLon, pickZoom, globeData.count)`
+——参数里必须挂 globeData.count，否则数据集加载完成后 pins 不会重查（模块
+内状态变化不触发资源重查，m09116 踩过）。globe.ts 削成纯数据层
+（buildDataset/parseSeed/haversine/nearestIn，115 行），paintGlobe/land.ts
+（56KB Natural Earth 轮廓）删除。
+
+**验证**：13/13 测试绿；web（OSM 真瓦片 `prefer extension maps.tiles="live"`）
+拖动→落定→自动播放、ask-play→flyTo 静默、图钉点选全链路通（图钉点击要选
+屏幕内且不与其它图钉重叠的——agent 命中测试比真实浏览器严格）；iOS 模拟器
+红图钉可见、拖动后 autoplay；macOS 真窗口 screencapture 验证（agent macos
+截图全黑仍是工具限制）。三端 APK/app 均带 7,991 台种子构建。

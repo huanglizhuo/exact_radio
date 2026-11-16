@@ -51,7 +51,8 @@
         "minWidth": 820,
         "minHeight": 560,
         "keepRunning": true
-      }
+      },
+      "minimumOS": "14.0"
     },
     "android": {}
   },
@@ -69,5 +70,15 @@
       "purpose": "any maskable"
     }
   ],
-  "userInterfaceStyle": "light"
+  "userInterfaceStyle": "light",
+  "packages": {
+    "@exact/maps": {
+      "web": {
+        "tiles": "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+        "attribution": "© OpenStreetMap contributors",
+        "maxZoom": 19
+      },
+      "android": {}
+    }
+  }
 }
