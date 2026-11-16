@@ -367,6 +367,9 @@ async function writeStations(storage: Storage, path: string, stations: Station[]
 // drift once duplicates are dropped, so the raw count is kept beside the kept rows.
 type Feed = { items: Station[]; raw: number; done: boolean };
 const feeds = new Map<string, Feed>();
+// Session-scoped LRU: revisits serve from cache so tab switches stay instant, and the
+// cap keeps a long browsing session from hoarding every tag/country/search it touched.
+const FEED_LIMIT = 12;
 
 async function pageOf(
   kind: string,
@@ -396,8 +399,13 @@ async function feed(
 ): Promise<Station[]> {
   const key = `${kind}|${value}|${query}|${lang}|${codec}`;
   let f = feeds.get(key);
-  if (!f || want <= PAGE) {
+  if (!f) {
     f = { items: [], raw: 0, done: false };
+    if (feeds.size >= FEED_LIMIT) {
+      // Map keeps insertion order, so the first key is the least recently created feed.
+      const oldest = feeds.keys().next().value as string;
+      feeds.delete(oldest);
+    }
     feeds.set(key, f);
   }
   while (f.items.length < want && !f.done) {
@@ -450,14 +458,20 @@ const sources: Sources = {
     })}`;
     const rows = await getJson(url);
     if (!Array.isArray(rows)) return [];
-    const sorted = (rows as unknown[])
-      .map((row) => ({ row, km: asNumber((row as Record<string, unknown>).geo_distance) }))
-      .filter((entry) => Number.isFinite(entry.km))
-      .sort((a, b) => a.km - b.km);
-    const stations = toStations(sorted.map((entry) => entry.row));
-    // The card lists them by distance, so keep the index's own number on each row.
-    const kept = stations.slice(0, 10);
-    return kept.map((station, index) => ({ ...station, distanceKm: Math.round(sorted[index].km / 100) / 10 }));
+    const seen = new Set<string>();
+    const out: Station[] = [];
+    for (const raw of rows as unknown[]) {
+      // Each row carries its own distance; normalising can drop rows, so pairing by
+      // index (the old way) attributed one station's kilometres to another.
+      const metres = (raw as Record<string, unknown>).geo_distance;
+      if (typeof metres !== 'number' || !Number.isFinite(metres)) continue;
+      const station = normalize(raw);
+      if (!station || seen.has(station.id)) continue;
+      seen.add(station.id);
+      out.push({ ...station, distanceKm: Math.round(metres / 100) / 10 });
+      if (out.length >= 10) break;
+    }
+    return out;
   },
 
   feed: async ([kind, value, query, want, lang, codec]: [

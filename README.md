@@ -41,7 +41,7 @@ bun exact.mjs ios --run    # iOS 模拟器
 
 ## 现在到哪一步
 
-四端都能跑：Web（`bun exact.mjs web-build --out dist`，11 个交互测试通过，已部署到 Cloudflare Pages）、macOS（`Airwave.app`）、iOS 模拟器、Android（真机已装）。UI 按 [docs/05-ui-redesign.md](docs/05-ui-redesign.md) 重做、并按 [docs/06-hig-review.md](docs/06-hig-review.md) 补上 Liquid Glass：三个 tab（**发现 / 世界 / 收藏**）+ 推入式搜索页（语言/编码筛选）+ 推入路由（热门榜 `/popular`、类型与国家）；世界页是 **可拖动、可双指缩放的地图**（松手就列这一带最近的电台，点行才播并飞过去）；播放面板是从底部起的 **sheet 路由**（可下拉、点面板外收起），里面是大封面 + LIVE + 三键 + 音量 + 睡眠定时。已实现：分页加载（每页 40 条，滚到底自动续）、语言/编码筛选、**播放失败先用备用 `url` 重试、再自动连跳 2 台**（`.m3u8/.m3u/.pls` 直接过滤，错误按 network/decode/not-allowed 分文案）、搜索历史、收藏与最近收听（`app:/data` JSON）、Media Session（锁屏与控制中心）、1024px 应用图标。截图在 `.research/shots/`。
+四端都能跑：Web（`bun exact.mjs web-build --out dist`，13 个交互测试通过，已部署到 Cloudflare Pages）、macOS（`Airwave.app`）、iOS 模拟器、Android（真机已装）。UI 按 [docs/05-ui-redesign.md](docs/05-ui-redesign.md) 重做、并按 [docs/06-hig-review.md](docs/06-hig-review.md) 补上 Liquid Glass：三个 tab（**发现 / 世界 / 收藏**）+ 推入式搜索页（语言/编码筛选）+ 推入路由（热门榜 `/popular`、类型与国家）；世界页是 **可拖动、可双指缩放的地图**（松手就列这一带最近的电台，点行才播并飞过去）；播放面板是从底部起的 **sheet 路由**（可下拉、点面板外收起），里面是大封面 + LIVE + 三键 + 音量 + 睡眠定时（15/30/60 分钟，倒数到 0 自动暂停）。已实现：分页加载（每页 40 条，滚到底自动续）、语言/编码筛选、**播放失败先用备用 `url` 重试、再自动连跳 2 台**（`.m3u8/.m3u/.pls` 直接过滤，错误按 network/decode/not-allowed 分文案；「换一台」按当前列表顺序换下一台）、静音记忆（恢复到静音前的音量）、列表骨架屏与首屏缓存（会话内 LRU，切 tab 秒回）、搜索历史、收藏与最近收听（`app:/data` JSON）、Media Session（锁屏与控制中心）、1024px 应用图标。截图在 `.research/shots/`。
 
 未做（P2 之后）：HLS 流的自研播放（现在只做过滤与提示）、播放列表文件（`.m3u`/`.pls`）的解析、商店截图素材、iOS 真机签名（`DEVELOPMENT_TEAM`）与 Mac 公证（`bun exact.mjs release`）。
 

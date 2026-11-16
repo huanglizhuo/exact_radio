@@ -647,3 +647,41 @@ view width=116 height=116 border-radius=14 position="relative" overflow="hidden"
   ```
 - 验证：重新发布后 `/`、`/radio`、`/tag/jazz`、`/nope` 全部 200 且返回同一 shell。
 - 教训：Pages 上「SPA 回落」只留一套机制（`_redirects`）；别同时放 `404.html`，两者会打架。
+
+## 43. 优化轮：五个老 bug + 睡眠定时 + 静音记忆 + 骨架屏 + 缓存 LRU
+
+**修的 bug（都是通读代码找出来的）：**
+
+1. **地图经纬度错位**（`app.contract` 的 `globeUp`）：`pickLat = globeLon`——从第一个提交起就把经度当
+   纬度用，「这一带有什么电台」一直搜错位置。实测验证：拖到圣赫勒拿岛落点 (-10.5, -13.1)，搜到的正是
+   `Radio Jamestown`；拖到卡累利阿 (61.4, 33.1)，最近的是莫斯科台 681km——修复前不可能命中。
+2. **`app.ts` 的 `nearest()` 距离张冠李戴**：`sorted[index]` 和 `toStations` 过滤后的数组索引错位
+   （normalize 丢行后，A 台的公里数贴到 B 台上）。改为每行带自己的 `geo_distance` 走完全程。
+3. **「换一台」从不换台**（`nextStation`）：有 current 时 `play(s)` 原地重播同一台，死链时无限重播。
+   重写为 `advance()`：按当前页面的列表（tag/country/search/favorites/discover）取「不是当前台的下一台」，
+   世界 tab 或列表空则随机 `tune()`；并拆出 `start(s)`（不重置跳过预算）与 `play(s)`（重置）。
+4. **自动连跳预算重做**：原来 `skips` 每次 `play` 都清零，永不耗尽。现在是 `autoLeft`（play/换一台时 =2）：
+   `failed()` 只在 `autoLeft > 0` 时武装跳过（`skips=1`），`autoSkip` 消耗一次（`autoLeft-1`）再 `advance()`；
+   两跳后停下，`failedPlayer` 显示错误行（重试/换一台）。offline 时不再无限刷。
+5. **`widenArea` 越界**：`4500 * 3 = 13500` 超过 6000 上限，改 `min(areaRadius * 3, 6000)`；
+   `areaKm` 文案「1.5 千公里」→「1500 公里」。
+
+**新功能：**
+
+- **睡眠定时**：面板音量行加 moon 芯片（`panel-sleep`），15→30→60→关 循环，激活时 AccentColor 底白字、
+  显示剩余 `${sleepLeft} 分`；`task sleepTick when sleepLeft > 0 every(60000, sleepDown)`，倒数到 0
+  自动 `wantPlay = false`。README 截图 caption 之前就写了睡眠定时，这次补上了真的。
+- **静音记忆**：`toggleMute` 静音时把音量存进 `lastVol`，再点恢复（默认 0.8 兜底）。
+- **发现页骨架屏**：`discoverLoading`（pending 且空）时 4 行 pulse 占位，不再白屏等首屏。
+- **feed 缓存 LRU**：去掉 `want <= PAGE` 就丢缓存重抓的行为（切 tab 回来必重 fetch）；改为会话内
+  命中缓存、上限 12 条按插入序淘汰。数据源里不许 `Date.now()`（确定性环境，编译报
+  `analyze-ambient-api`），所以没有 TTL——radio-browser 数据变化极慢，会话内缓存够用。
+
+**这次的语法/测试教训：**
+
+- **action 内的读是「动作开始时」的值**：`sleepLeft = sleepMin` 读到旧值（编译器有
+  `analyze-read-after-assign` 警告，`cycleSleep`/`sleepDown` 都要 `let next = …` 先算）。写法：
+  `let next = (三元); sleepMin = next; sleepLeft = next`。
+- 测试里 tap 之后要 `clock +1`（或 `clock settle`）状态才落地；`every(60000)` 的任务在测试假时钟下
+  `clock +900000` 会逐分钟触发，可以直接测完整倒计时。
+- 测试从 11 个加到 13 个（睡眠定时循环/倒数/暂停、静音记忆），13/13 绿。
