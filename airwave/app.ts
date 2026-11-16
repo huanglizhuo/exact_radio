@@ -3,7 +3,9 @@
 // radio-browser is an open, non-commercial index of ~52k stations: no key, no account,
 // CORS open. Its house rules ask for an identifiable User-Agent and one `/json/url/{uuid}`
 // per play (which we send from `pushRecent`), and that clients never hard-code one server.
-import type { Answer, Sources } from './app.contract.d.ts';
+import type { Answer, Ctx2D, Frame, Sources } from './app.contract.d.ts';
+import { buildDataset, nearestIn, paintGlobe, parseSeed, type Dataset, type SeedRow } from './globe';
+import { GLOBE_SEED } from './data/globe-seed';
 
 const PRIMARY = 'https://de1.api.radio-browser.info';
 const ALIAS = 'https://all.api.radio-browser.info';
@@ -13,6 +15,7 @@ const RECENT_LIMIT = 20;
 const SEARCHES = 'app:/data/searches.json';
 const SEARCH_LIMIT = 8;
 const PAGE = 40;
+const GLOBE_CACHE = 'app:/cache/globe.json';
 const UA = 'Airwave/0.1 (Exact; radio-browser client)';
 
 export const grants = [
@@ -20,6 +23,8 @@ export const grants = [
   `net.fetch ${ALIAS}`,
   'fs.read app:/data',
   'fs.write app:/data',
+  'fs.read app:/cache',
+  'fs.write app:/cache',
 ].join('\n');
 
 type Station = {
@@ -103,81 +108,123 @@ function asNumber(value: unknown): number {
 }
 
 
-// ── the map ─────────────────────────────────────────────────────────────────
-// A plain slippy map: the tiles are Esri's light grey canvas basemap (no key, attribution
-// required), and every
-// number the view needs — tile offsets, the pin, the degrees per pixel — is computed
-// here, because Contract has no trigonometry.
-const RAD = Math.PI / 180;
-const TILE = 256;
-// The map fills its tab, and the tab's size isn't known here, so the tile layer is built
-// for a box big enough to cover the largest window and the view centres it and clips.
-const MAP_BOX = 1400;
-const TILE_URL =
-  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile';
+// ── the globe ────────────────────────────────────────────────────────────────
+// The world view draws itself (airwave/globe.ts) from the dataset held here:
+// the cached fetch first, then the seed baked in at native build time, then a
+// live fetch. `globeLoad(rev)` is asked twice — rev 1 boots from disk, a later
+// rev (the once-per-launch task, or the refresh button) refetches and rewrites
+// the cache.
+let globeData: Dataset | null = null;
+let globeLoading = false;
 
-type MapTile = { k: number; url: string; left: number; top: number };
+// Five real stations: what tests and the bake see, where every fetch refuses.
+const GLOBE_SAMPLE: SeedRow[] = [
+  ['bbc-world', 'BBC World Service', 'https://stream.live.vc.bbcmedia.co.uk/bbc_world_service', 51.5, -0.12, '', 'AAC', 0, 'GB', 'news', 900],
+  ['radio-france', 'France Inter', 'https://icecast.radiofrance.fr/franceinter-midfi.mp3', 48.86, 2.35, '', 'MP3', 128, 'FR', 'general', 500],
+  ['nhk-tokyo', 'NHK Radio 1', 'https://netradio-live2.nhk.jp/hls/live/200170/nhkradiru1l/master.m3u8', 35.68, 139.69, '', 'AAC', 0, 'JP', 'news', 400],
+  ['kexp-seattle', 'KEXP', 'https://kexp.streamguys1.com/kexp160.aac', 47.6, -122.33, '', 'AAC', 160, 'US', 'alternative', 800],
+  ['abc-sydney', 'ABC Triple J', 'https://live-radio01.mediahubaustralia.com/2TJW/aac/', -33.87, 151.21, '', 'AAC', 128, 'AU', 'alternative', 300],
+];
 
-function lonToX(lon: number, scale: number): number {
-  return ((lon + 180) / 360) * scale;
+// The baked seed is already row arrays (a literal, not JSON text — escapes that
+// a template literal would evaluate made JSON.parse quietly corrupt it).
+function seedRows(seed: unknown): SeedRow[] {
+  if (!Array.isArray(seed)) return [];
+  return seed.filter(
+    (row): row is SeedRow =>
+      Array.isArray(row) && row.length >= 11 && typeof row[0] === 'string' && typeof row[3] === 'number',
+  );
 }
 
-function latToY(lat: number, scale: number): number {
-  const clamped = Math.max(-85.05, Math.min(85.05, lat)) * RAD;
-  const s = Math.sin(clamped);
-  return (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * scale;
-}
-
-function mapView(
-  lat: number,
-  lon: number,
-  zoom: number,
-  markerLat: number,
-  markerLon: number,
-  pickLat: number,
-  pickLon: number,
-) {
-  const z = Math.max(1, Math.min(8, Math.round(zoom)));
-  const scale = TILE * Math.pow(2, z);
-  const centerX = lonToX(lon, scale);
-  const centerY = latToY(lat, scale);
-  const left = centerX - MAP_BOX / 2;
-  const top = centerY - MAP_BOX / 2;
-  const span = Math.pow(2, z);
-  const tiles: MapTile[] = [];
-  for (let x = Math.floor(left / TILE); x <= Math.floor((left + MAP_BOX - 1) / TILE); x += 1) {
-    for (let y = Math.floor(top / TILE); y <= Math.floor((top + MAP_BOX - 1) / TILE); y += 1) {
-      if (y < 0 || y >= span) continue;
-      const wrapped = ((x % span) + span) % span;
-      tiles.push({
-        k: y * span + wrapped,
-        url: `${TILE_URL}/${z}/${y}/${wrapped}`,
-        left: Math.round(x * TILE - left),
-        top: Math.round(y * TILE - top),
-      });
+async function bootGlobe(storage: Storage): Promise<{ rev: number; count: number; origin: string }> {
+  try {
+    const bytes = await storage.fs.readFile(GLOBE_CACHE);
+    const rows = parseSeed(decoder.decode(bytes));
+    if (rows.length > 0) {
+      globeData = buildDataset(rows, 'cache');
+      return { rev: 1, count: rows.length, origin: 'cache' };
     }
+  } catch {
+    // Nothing cached yet — the seed or the fetch takes over.
   }
-  const hasMarker = markerLat !== 0 || markerLon !== 0;
-  const markerLeft = hasMarker ? Math.round(lonToX(markerLon, scale) - left) : -100;
-  const markerTop = hasMarker ? Math.round(latToY(markerLat, scale) - top) : -100;
-  // Where the user let go — the pin that keeps "I chose this spot" on screen.
-  const hasPick = pickLat !== 0 || pickLon !== 0;
-  const pickLeft = hasPick ? Math.round(lonToX(pickLon, scale) - left) : -100;
-  const pickTop = hasPick ? Math.round(latToY(pickLat, scale) - top) : -100;
-  const lonPerPx = 360 / scale;
-  return {
-    box: MAP_BOX,
-    half: MAP_BOX / 2,
-    tiles,
-    markerLeft,
-    markerTop,
-    hasMarker,
-    pickLeft,
-    pickTop,
-    hasPick,
-    lonPerPx,
-    latPerPx: lonPerPx * Math.cos(((Math.abs(lat) > 80 ? 80 : Math.abs(lat)) * RAD)),
-  };
+  const seeded = seedRows(GLOBE_SEED);
+  if (seeded.length > 0) {
+    globeData = buildDataset(seeded, 'seed');
+    return { rev: 1, count: seeded.length, origin: 'seed' };
+  }
+  // Nothing on disk and nothing baked in (the web build): pull the whole set now.
+  try {
+    return await fetchGlobe(1, storage);
+  } catch {
+    // Tests and the bake: the index's answers there carry no usable coordinates,
+    // so the sample keeps the globe drawable and deterministic.
+    globeData = buildDataset(GLOBE_SAMPLE, 'sample');
+    return { rev: 1, count: GLOBE_SAMPLE.length, origin: 'sample' };
+  }
+}
+
+// One index row → the compact seed row the globe keeps (see scripts/snapshot-globe.sh).
+function seedRowOf(raw: unknown): SeedRow | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const row = raw as Record<string, unknown>;
+  const id = asString(row.stationuuid);
+  const stream = asString(row.url_resolved) || asString(row.url);
+  const lat = asNumber(row.geo_lat);
+  const lon = asNumber(row.geo_long);
+  if (!id || !/^https:\/\//i.test(stream)) return null;
+  // A live `${…}` in a URL never plays and would smuggle code through string data.
+  if (stream.includes('${') || stream.includes('`')) return null;
+  if (lat === 0 && lon === 0) return null;
+  if (asNumber(row.hls) !== 0) return null;
+  if (/\.(?:m3u8|m3u|pls)(?:[?#]|$)/i.test(stream)) return null;
+  const favicon = asString(row.favicon);
+  const codec = asString(row.codec).toUpperCase();
+  const tag = asString(row.tags).split(',')[0].trim();
+  return [
+    id,
+    cleanName(asString(row.name), hostOf(stream)).slice(0, 64),
+    stream.slice(0, 180),
+    Math.round(lat * 1000) / 1000,
+    Math.round(lon * 1000) / 1000,
+    /^https:\/\//i.test(favicon) ? favicon.slice(0, 120) : '',
+    codec === 'UNKNOWN' ? '' : codec.slice(0, 8),
+    asNumber(row.bitrate),
+    asString(row.countrycode).slice(0, 2),
+    tag.slice(0, 24),
+    asNumber(row.votes),
+  ];
+}
+
+async function fetchGlobe(rev: number, storage: Storage): Promise<{ rev: number; count: number; origin: string }> {
+  globeLoading = true;
+  try {
+    const rows: SeedRow[] = [];
+    const seen = new Set<string>();
+    for (let offset = 0; offset < 12000; offset += 4000) {
+      const raw = await getJson(
+        `/json/stations/search?${qs({ hidebroken: 'true', is_https: 'true', has_geo_info: 'true', order: 'votes', reverse: 'true', limit: 4000, offset })}`,
+      );
+      if (!Array.isArray(raw)) break;
+      for (const item of raw) {
+        const row = seedRowOf(item);
+        if (row && !seen.has(row[0])) {
+          seen.add(row[0]);
+          rows.push(row);
+        }
+      }
+      if (raw.length < 4000) break;
+    }
+    if (rows.length === 0) throw new Error('The station index answered no geo-tagged stations.');
+    globeData = buildDataset(rows, 'net');
+    try {
+      await storage.fs.atomicWriteFile(GLOBE_CACHE, encoder.encode(JSON.stringify(rows)));
+    } catch {
+      // The cache is an optimisation; the session still has the fresh set.
+    }
+    return { rev, count: rows.length, origin: 'net' };
+  } finally {
+    globeLoading = false;
+  }
 }
 
 function hostOf(url: string): string {
@@ -433,45 +480,34 @@ function reportClick(id: string): void {
 }
 
 const sources: Sources = {
-  map: async ([lat, lon, zoom, mLat, mLon, pLat, pLon]: [
-    number,
-    number,
-    number,
-    number,
-    number,
-    number,
-    number,
-  ]) => mapView(lat, lon, zoom, mLat, mLon, pLat, pLon),
+  // rev 1 reads what the app already has (cache → seed → nothing); rev > 1 fetches.
+  globeLoad: async ([rev]: [number], _store, storage): Promise<{ rev: number; count: number; origin: string }> =>
+    rev <= 1 ? bootGlobe(storage) : fetchGlobe(rev, storage),
 
-  // What's around the point the user let go of: the index answers by distance when asked
-  // with geo_distance, and the rows come back nearest first after the sort below.
-  nearest: async ([lat, lon, radiusKm]: [number, number, number]): Promise<Station[]> => {
-    // `geo_distance` is in metres — passing kilometres quietly searches a few blocks.
-    const metres = Math.round(Math.max(10, radiusKm) * 1000);
-    const url = `/json/stations/search?${qs({
-      geo_lat: lat.toFixed(3),
-      geo_long: lon.toFixed(3),
-      geo_distance: metres,
-      hidebroken: 'true',
-      is_https: 'true',
-      limit: 40,
-    })}`;
-    const rows = await getJson(url);
-    if (!Array.isArray(rows)) return [];
-    const seen = new Set<string>();
-    const out: Station[] = [];
-    for (const raw of rows as unknown[]) {
-      // Each row carries its own distance; normalising can drop rows, so pairing by
-      // index (the old way) attributed one station's kilometres to another.
-      const metres = (raw as Record<string, unknown>).geo_distance;
-      if (typeof metres !== 'number' || !Number.isFinite(metres)) continue;
-      const station = normalize(raw);
-      if (!station || seen.has(station.id)) continue;
-      seen.add(station.id);
-      out.push({ ...station, distanceKm: Math.round(metres / 100) / 10 });
-      if (out.length >= 10) break;
-    }
-    return out;
+  // The ten nearest stations to where the globe settled — the dataset the canvas
+  // already holds, so this never waits on the network.
+  globeNearest: async ([lat, lon]: [number, number]): Promise<Station[]> => {
+    if (!globeData) return [];
+    const hits = nearestIn(globeData, lat, lon, 10);
+    return hits.map(({ row, km }) => ({
+      id: row[0],
+      name: row[1],
+      tagline: [row[8], row[9]].filter(Boolean).join(' · '),
+      stream: row[2],
+      fallback: '',
+      favicon: row[5],
+      country: row[8],
+      countryCode: row[8],
+      tags: row[9] ? [row[9]] : [],
+      codec: row[6],
+      bitrate: asNumber(row[7]),
+      votes: asNumber(row[10]),
+      clicks: 0,
+      frequency: freqOf(row[0]),
+      lat: asNumber(row[3]),
+      lon: asNumber(row[4]),
+      distanceKm: Math.round(km * 10) / 10,
+    }));
   },
 
   feed: async ([kind, value, query, want, lang, codec]: [
@@ -572,3 +608,25 @@ const sources: Sources = {
 
 export const answer: Answer = (source, args, store, storage, native) =>
   sources[source](args, store, storage, native);
+
+// ── the globe's canvas surface ───────────────────────────────────────────────
+// Contract hands `draw` the surface's args in the order the view wrote them.
+export const surfaces: Record<string, number> = { globe: 8 };
+
+export function draw(
+  _surface: string,
+  args: unknown[],
+  ctx: unknown,
+  frame: unknown,
+): boolean {
+  const [rev, lat, lon, zoom, curLat, curLon, curId, flags] = args as [
+    number, number, number, number, number, number, string, number,
+  ];
+  return paintGlobe(
+    ctx as Ctx2D,
+    frame as Frame,
+    { rev, lat, lon, zoom, curLat, curLon, curId, flags },
+    globeData,
+    globeLoading,
+  );
+}

@@ -689,3 +689,27 @@ view width=116 height=116 border-radius=14 position="relative" overflow="hidden"
 面板里的 moon 芯片（`panel-sleep`）、测试「the sleep timer cycles, counts down and pauses」、
 README 两处文案。`docs/images/ios-player.png` 截图里如果拍到过 moon 芯片，重截即可（UI 里已无此按钮）。
 **结论：睡眠定时不再加回来，除非用户主动要。**
+
+## 45. 地球仪（世界 tab 重做：Esri 瓦片 → canvas 自绘地球）
+
+完整方案与取舍见 [09-globe-plan.md](09-globe-plan.md)；这节记实施时的坑。
+
+- **canvas 不能 `position=absolute inset=0`**：高度塌成 ~160px 白屏。必须包一层 absolute view，
+  canvas 在里面 `width=100% height=100%`（weatherlight 先例）。
+- **测试里的 task 定时器要显式 `clock +N`**：`clock settle` 只等回复与转场，不等 `after 600/350`
+  的 task；`autoPick`/`refreshOnce` 的测试都要补 `clock +1200`。
+- **种子不能装进模板字符串**：`export const SEED = \`<json>\`` 会被 JS 求值——
+  ① Radio Brașov 的 url 自带 `?nocache=${Math.random()}`，bake 直接报
+  `Math.random() is unavailable in data sources`；② 就算滤掉它，json.dumps 的 `\"`/`\n`
+  转义在模板字面量里被求值，数据静默损坏（`JSON.parse` 报 `Expected ']'`，
+  种子 0 行、origin 变 "net"）。**正确做法：生成 JS 数组字面量** `export const GLOBE_SEED = [[…],…]`
+  （数据即代码，没有解析环节），运行时 `seedRows()` 只做形状校验；`${`/反引号在
+  snapshot 与 `seedRowOf` 两处都拒绝。
+- **原生 payload 里的种子位置**：mac/iOS standalone 跑 `…/link/plan/app.hbc`（2.05MB，含种子）；
+  `…/updating/development/plan/app.js` 是 dev-server arm（无种子，agent 驱动用的就是它，
+  所以 agent 里 origin 是 "net" 属预期）。Android 的 plan 烤在 `lib/arm64-v8a/libexactcanvas.so`
+  里（README:266 "the reader boots the plan its APK bakes"）。web dist 的 app.js 保持 ~387KB 无种子。
+- **构建脚本**：`scripts/build-native.sh mac|ios|android` 先把 `.research/geo/globe-seed.full.ts`
+  拷进 `data/globe-seed.ts`（git 默认 `[]`）、构建完 trap 还原；`scripts/snapshot-globe.sh`
+  从 radio-browser 三页 4000 重建快照（当前 7,991 台 / 1.71MB）。
+- **iOS 真机渲染验证**：vello/metal 下像素分析 dark 80.4% / land 11.9% / UI 6.9% —— 地球画出来了。

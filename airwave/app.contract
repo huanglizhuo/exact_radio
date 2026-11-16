@@ -23,24 +23,10 @@ shape Station
   lon: number
   distanceKm: number
 
-shape MapTile
-  k: number
-  url: string
-  left: number
-  top: number
-
-shape MapView
-  box: number
-  half: number
-  tiles: MapTile[]
-  markerLeft: number
-  markerTop: number
-  hasMarker: bool
-  pickLeft: number
-  pickTop: number
-  hasPick: bool
-  lonPerPx: number
-  latPerPx: number
+shape GlobeData
+  rev: number
+  count: number
+  origin: string
 
 shape DialPick
   rev: number
@@ -84,8 +70,11 @@ fn wrapLon(v: number): number =
 fn nearestLon(from: number, to: number): number =
   to - from > 180 ? to - 360 : to - from < -180 ? to + 360 : to
 
-fn radiusFor(z: number): number =
-  z <= 3 ? 1500 : z == 4 ? 800 : z == 5 ? 400 : z == 6 ? 200 : 100
+fn stepFor(z: number): number =
+  z <= 1 ? 0.409 : z == 2 ? 0.205 : z == 3 ? 0.102 : z == 4 ? 0.0512 : z == 5 ? 0.0256 : z == 6 ? 0.0128 : 0.0064
+
+fn nearKm(z: number): number =
+  z <= 1 ? 3000 : z == 2 ? 1500 : z == 3 ? 800 : z == 4 ? 400 : z == 5 ? 200 : z == 6 ? 100 : 50
 
 component App
   state draft = ""
@@ -104,7 +93,9 @@ component App
   state booted = false
   state globeLat = 26
   state globeLon = 12
-  state mapZoom = 3
+  state mapZoom = 2
+  state globeRev = 1
+  state autoTune = true
   state dragging = false
   state dragX = 0
   state dragY = 0
@@ -113,7 +104,6 @@ component App
   state settleRev = 0
   state pickLat = 0
   state pickLon = 0
-  state areaRadius = 1500
   state areaMode = ""
   state restored = false
   state dragMoved = false
@@ -180,10 +170,13 @@ component App
   derive askName = match first(nearby) { case some(s) => s.name, case none => "" }
   derive askFavicon = match first(nearby) { case some(s) => s.favicon, case none => "" }
   derive askKm = match first(nearby) { case some(s) => s.distanceKm, case none => 0 }
-  derive areaKm = `${areaRadius} 公里`
   derive langLabel = lang == "" ? "语言" : langName
-  derive lonStep = map.lonPerPx > 0 ? map.lonPerPx : 0.35
-  derive latStep = map.latPerPx > 0 ? map.latPerPx : 0.35
+  derive lonStep = stepFor(mapZoom)
+  derive latStep = stepFor(mapZoom)
+  derive globeFlags = (dragging ? 1 : 0) + (areaOpen ? 2 : 0)
+  derive globeRefreshing = pending(globeData)
+  derive globeOriginLabel = (globeData.origin == "seed" ? "内置数据" : globeData.origin == "cache" ? "已缓存" : globeData.origin == "net" ? "已更新" : "")
+  derive pickRadius = nearKm(mapZoom)
   derive pickedRev = match first(picked) { case some(p) => p.rev, case none => -1 }
 
   resource discoverList = feed("discover", "", "", want, "", "") as shape Station[] else empty()
@@ -194,9 +187,9 @@ component App
   resource favs = loadFavorites() as shape Station[] else empty()
   resource recent = loadRecent() as shape Station[] else empty()
   resource history = searchHistory() as shape string[] else empty()
-  resource map = map(globeLat, globeLon, mapZoom, curLat, curLon, pickLat, pickLon) as shape MapView else empty()
-  resource nearby = nearest(pickLat, pickLon, areaRadius) when settleRev > 0 as shape Station[] else empty()
-  resource picked = randomStation(dialRev, currentId, pickLat, pickLon, areaRadius) when dialRev > 0 as shape DialPick[] else empty()
+  resource globeData = globeLoad(globeRev) as shape GlobeData else empty()
+  resource nearby = globeNearest(pickLat, pickLon) when settleRev > 0 as shape Station[] else empty()
+  resource picked = randomStation(dialRev, currentId, pickLat, pickLon, pickRadius) when dialRev > 0 as shape DialPick[] else empty()
 
   mutation savedList as shape Reply refreshes favs
   mutation logged as shape Reply refreshes recent
@@ -214,8 +207,10 @@ component App
     after(650, lockIn)
   task gaveUp when tuning and dialRev > 0 and picked.length == 0 and not pending(picked)
     after(4000, stopTuning)
-  task autoWiden when areaOpen and areaEmpty and areaRadius < 6000
-    after(500, widenArea)
+  task refreshOnce when booted and globeRev == 1
+    after(600, bumpGlobe)
+  task autoPick when areaAsking and autoTune and not pending(nearby) and nearby.length > 0
+    after(350, playNearestNow)
   task spinTick when spinning
     every(45, spinFrame)
 
@@ -466,7 +461,7 @@ component App
       let sx = p2x - p1x
       let sy = p2y - p1y
       let span = sx * sx + sy * sy
-      if span > pinchSpan * 1.8 and mapZoom < 8
+      if span > pinchSpan * 1.8 and mapZoom < 7
         mapZoom = mapZoom + 1
         pinchSpan = span
       else if span * 1.8 < pinchSpan and mapZoom > 1
@@ -496,7 +491,6 @@ component App
       else if dragMoved
         pickLat = globeLat
         pickLon = globeLon
-        areaRadius = radiusFor(mapZoom)
         areaMode = "ask"
         settleRev = settleRev + 1
         dragMoved = false
@@ -504,10 +498,20 @@ component App
   action closeArea
     areaMode = ""
 
-  action widenArea
-    if areaRadius < 6000
-      areaRadius = min(areaRadius * 3, 6000)
-      settleRev = settleRev + 1
+  action bumpGlobe
+    globeRev = globeRev + 1
+
+  action globeWheel(e: WheelEvent)
+    mapZoom = clamp(mapZoom + (e.deltaY > 0 ? -1 : 1), 1, 7)
+
+  action toggleAutoTune
+    autoTune = not autoTune
+
+  action playNearestNow
+    match first(nearby)
+      case some(s)
+        playArea(s)
+      case none
 
   action openAreaList
     areaMode = "list"
@@ -528,7 +532,7 @@ component App
       spinTo(s.lat, s.lon)
 
   action zoomIn
-    if mapZoom < 8
+    if mapZoom < 7
       mapZoom = mapZoom + 1
 
   action zoomOut
@@ -820,45 +824,50 @@ component App
               else if e.name == "radio"
                 column flex=1 min-height=0 position="relative" testId="radio-face"
                   margin-top="calc(-1 * var(--exact-safe-area-inset-top))"
-                  view position="absolute" inset=0 testId="globe" background-color="#DDE6EE"
-                    status-bar-style="dark-content" touch-action="none"
-                    pointerdown=globeDown pointermove=globeMove pointerup=globeUp
-                    view position="absolute" width=map.box height=map.box
-                      left="50%" top="50%" margin-left=(0 - map.half) margin-top=(0 - map.half)
-                      for t in map.tiles key=t.k
-                        image t.url width=256 height=256 position="absolute" left=t.left top=t.top
-                      if map.hasMarker
-                        view position="absolute" left=(map.markerLeft - 11) top=(map.markerTop - 11)
-                          width=22 height=22 border-radius=11 background-color="AccentColor"
-                          border="3px solid #FFFFFF" box-shadow="0 2px 8px rgba(0, 0, 0, 0.35)"
-                      if map.hasPick
-                        view position="absolute" left=(map.pickLeft - 13) top=(map.pickTop - 13)
-                          width=26 height=26 border-radius=13 press=openAreaList testId="pick-pin"
-                          border="3px solid #FFFFFF" background-color="rgba(20, 60, 140, 0.20)"
-                          box-shadow="0 2px 8px rgba(0, 0, 0, 0.35)"
-                  if dragging
-                    view position="absolute" left="50%" top="50%" width=28 height=28 border-radius=14
-                      margin-left=-14 margin-top=-14 testId="map-center"
-                      border="3px solid rgba(20, 60, 140, 0.55)" background-color="rgba(255, 255, 255, 0.70)"
-                  column position="absolute" right=14 top="calc(14px + var(--exact-safe-area-inset-top))" gap=8
+                  view position="absolute" inset=0 testId="globe" background-color="#0B0D14"
+                    status-bar-style="light-content" touch-action="none"
+                    pointerdown=globeDown pointermove=globeMove pointerup=globeUp wheel=globeWheel
+                    canvas surface=globe(globeRev, globeLat, globeLon, mapZoom, curLat, curLon, currentId, globeFlags)
+                      width="100%" height="100%"
+                  column position="absolute" right=14 top="calc(14px + var(--exact-safe-area-inset-top))" gap=8 align-items="flex-end"
                     button press=zoomIn aria-label="放大" testId="zoom-in" appearance="none" padding=0
                       row width=44 height=44 border-radius=22 align-items="center" justify-content="center"
-                        background-color="rgba(255, 255, 255, 0.88)" backdrop-filter="blur(18px)"
-                        border="1px solid rgba(0, 0, 0, 0.06)"
-                        image "symbol:add" width=18 height=18 color="-exact-label"
+                        background-color="rgba(15, 23, 42, 0.62)" backdrop-filter="blur(18px)"
+                        border="1px solid rgba(148, 163, 184, 0.22)"
+                        image "symbol:add" width=18 height=18 color="#E2E8F0"
                     button press=zoomOut aria-label="缩小" testId="zoom-out" appearance="none" padding=0
                       row width=44 height=44 border-radius=22 align-items="center" justify-content="center"
-                        background-color="rgba(255, 255, 255, 0.88)" backdrop-filter="blur(18px)"
-                        border="1px solid rgba(0, 0, 0, 0.06)"
-                        image "symbol:minus" width=18 height=18 color="-exact-label"
+                        background-color="rgba(15, 23, 42, 0.62)" backdrop-filter="blur(18px)"
+                        border="1px solid rgba(148, 163, 184, 0.22)"
+                        image "symbol:minus" width=18 height=18 color="#E2E8F0"
+                    button press=toggleAutoTune aria-label="松手自动播放最近的台" testId="auto-tune" appearance="none" padding=0
+                      row align-items="center" height=36 padding="0 12px" border-radius=18
+                        background-color=(autoTune ? "AccentColor" : "rgba(15, 23, 42, 0.62)")
+                        border="1px solid rgba(148, 163, 184, 0.22)" backdrop-filter="blur(18px)"
+                        text "自动播放" font="-exact-caption1" font-weight=600 color=(autoTune ? "#FFFFFF" : "#CBD5E1")
+                  row position="absolute" left=14 top="calc(14px + var(--exact-safe-area-inset-top))" gap=6 align-items="center"
+                    row align-items="center" gap=8 height=36 padding="0 12px" border-radius=18
+                      background-color="rgba(15, 23, 42, 0.62)" backdrop-filter="blur(18px)"
+                      border="1px solid rgba(148, 163, 184, 0.22)" testId="globe-status"
+                      if globeRefreshing
+                        text "更新中" font="-exact-caption2" color="#93C5FD" testId="globe-origin"
+                      else
+                        text `${globeData.count} 台` font="-exact-caption1" font-weight=600 color="#E2E8F0"
+                        if globeOriginLabel != ""
+                          text globeOriginLabel font="-exact-caption2" color="rgba(148, 163, 184, 0.9)" testId="globe-origin"
+                    button press=bumpGlobe aria-label="刷新电台库" testId="globe-refresh" appearance="none" padding=0
+                      row width=36 height=36 border-radius=18 align-items="center" justify-content="center"
+                        background-color="rgba(15, 23, 42, 0.62)" backdrop-filter="blur(18px)"
+                        border="1px solid rgba(148, 163, 184, 0.22)"
+                        image "symbol:radio" width=16 height=16 color="#93C5FD"
                   column position="absolute" left=14 bottom=170 gap=4 align-items="flex-start"
                     if not hasCurrent or busy
-                      text (busy ? (tuning ? "正在换台…" : "正在移动…") : "拖动地图，松手看这一带有什么电台")
-                        font="-exact-caption1" color="-exact-secondary-label" testId="radio-hint"
-                        background-color="rgba(255, 255, 255, 0.82)" border-radius=8 padding="3px 8px"
-                    text "地图 © Esri · HERE · Garmin · OpenStreetMap"
-                      font="-exact-caption2" color="-exact-secondary-label" testId="map-credit"
-                      background-color="rgba(255, 255, 255, 0.82)" border-radius=6 padding="2px 6px"
+                      text (busy ? (tuning ? "正在换台…" : "正在查看附近…") : "拖动地球，松手播最近的台")
+                        font="-exact-caption1" color="#CBD5E1" testId="radio-hint"
+                        background-color="rgba(15, 23, 42, 0.62)" border-radius=8 padding="3px 8px"
+                    text "电台数据 © radio-browser"
+                      font="-exact-caption2" color="rgba(148, 163, 184, 0.8)" testId="map-credit"
+                      background-color="rgba(15, 23, 42, 0.5)" border-radius=6 padding="2px 6px"
                   if areaOpen
                     column position="absolute" left=12 right=12 bottom=166 gap=0
                       max-width="36rem" margin-left="auto" margin-right="auto" box-sizing="border-box"
@@ -867,7 +876,7 @@ component App
                       row align-items="center" gap=8 padding="10px 14px"
                         column flex=1 gap=2 min-width=0
                           text "附近的电台" font="-exact-subheadline" font-weight=600 testId="area-header"
-                          text (areaBusy ? `正在查看这一带（${areaKm}）…` : areaEmpty ? `这一带 ${areaKm}内没有登记的电台` : `${nearby.length} 个 · ${areaKm}内 · 按距离`)
+                          text (areaBusy ? "正在查看这一带…" : areaEmpty ? (globeData.count == 0 ? "电台库还没就绪" : "这附近没有登记的电台") : `${nearby.length} 台 · 最近 ${askKm} 公里`)
                             font="-exact-caption2" color="-exact-secondary-label" line-clamp=1 testId="area-sub"
                         button press=closeArea aria-label="关闭" testId="area-close" appearance="none" padding=6
                           image "symbol:close" width=14 height=14 color="-exact-secondary-label"
@@ -881,18 +890,13 @@ component App
                                 view height=10 width="45%" border-radius=5 background-color="-exact-tertiary-background"
                           else if areaEmpty
                             column gap=10 align-items="center"
-                              text "这一带没有登记的电台" font="-exact-subheadline" font-weight=600
-                              text "换个大的范围，或者回到正在播的台。" font="-exact-caption2" color="-exact-secondary-label" text-align="center"
-                              row gap=8
-                                button press=widenArea testId="ask-widen" appearance="none" padding=0
+                              text "这附近没有登记的电台" font="-exact-subheadline" font-weight=600
+                              text "把地球转到别的海域，或者回到正在播的台。" font="-exact-caption2" color="-exact-secondary-label" text-align="center"
+                              if hasCurrent
+                                button press=recenterOnCurrent testId="ask-recenter" appearance="none" padding=0
                                   row height=40 padding="0 14px" border-radius=12 align-items="center" justify-content="center"
                                     background-color="-exact-tertiary-background"
-                                    text "扩大范围" font="-exact-subheadline"
-                                if hasCurrent
-                                  button press=recenterOnCurrent testId="ask-recenter" appearance="none" padding=0
-                                    row height=40 padding="0 14px" border-radius=12 align-items="center" justify-content="center"
-                                      background-color="-exact-tertiary-background"
-                                      text "回到当前电台" font="-exact-subheadline"
+                                    text "回到当前电台" font="-exact-subheadline"
                           else
                             row gap=10 align-items="center"
                               if askFavicon != ""
@@ -929,14 +933,9 @@ component App
                                     view height=10 width="40%" border-radius=5 background-color="-exact-tertiary-background"
                           else if areaEmpty
                             column gap=10 padding="0 14px 14px" align-items="center"
-                              text "这一带没有登记的电台" font="-exact-subheadline" font-weight=600
-                              text "换个大的范围，或者回到正在播的台。" font="-exact-caption2" color="-exact-secondary-label" text-align="center"
-                              row gap=8
-                                button press=widenArea testId="area-widen" appearance="none" padding=0
-                                  row height=40 padding="0 14px" border-radius=12 align-items="center" justify-content="center"
-                                    background-color="-exact-tertiary-background"
-                                    text "扩大范围" font="-exact-subheadline"
-                                if hasCurrent
+                              text "这附近没有登记的电台" font="-exact-subheadline" font-weight=600
+                              text "把地球转到别的海域，或者回到正在播的台。" font="-exact-caption2" color="-exact-secondary-label" text-align="center"
+                              if hasCurrent
                                   button press=recenterOnCurrent testId="area-recenter" appearance="none" padding=0
                                     row height=40 padding="0 14px" border-radius=12 align-items="center" justify-content="center"
                                       background-color="-exact-tertiary-background"

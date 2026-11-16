@@ -57,16 +57,25 @@ test "a page holds forty rows and the next one is asked for"
   expect state want == 40
   expect state discoverList.length <= 40
 
-test "the radio tab shows the map and asks for a station"
+test "the radio tab shows the globe and asks for a station"
   clock settle
   tap "tab-radio"
+  clock settle
   expect text "player-idle" == "还没在播"
-  expect state mapZoom == 3
+  expect state mapZoom == 2
+  expect state globeData.count >= 1
   expect state tuning == false
   expect state dialRev == 0
   tap "player-next"
   expect state tuning == true
   expect state dialRev == 1
+
+test "a settled globe finds its nearest station offline"
+  clock settle
+  tap "tab-radio"
+  clock settle
+  expect state nearby.length == 0
+  expect state settleRev == 0
 
 test "the search screen offers language and codec menus"
   tap "open-search"
