@@ -713,3 +713,31 @@ README 两处文案。`docs/images/ios-player.png` 截图里如果拍到过 moon
   拷进 `data/globe-seed.ts`（git 默认 `[]`）、构建完 trap 还原；`scripts/snapshot-globe.sh`
   从 radio-browser 三页 4000 重建快照（当前 7,991 台 / 1.71MB）。
 - **iOS 真机渲染验证**：vello/metal 下像素分析 dark 80.4% / land 11.9% / UI 6.9% —— 地球画出来了。
+
+## 46. 地球仪拖动卡顿：一帧的开销砍到 1/31 次绘制调用
+
+症状：放大后拖动地球掉帧。profile 下来三个源头——
+
+1. **每点每帧 6 次三角函数 + 一个新对象**：`project()` 对 7,991 个站点、
+   4,994 个陆地顶点、~500 个网格点每帧各返回一个 `{x, y, visible}` 字面量
+   （~8.5k 次/帧的分配，GC 停顿才是卡顿主源；`Math.sin(phi0)` 还对每个点重算）。
+   → `buildDataset` 预计算单位 3D 向量（`px/py/pz`），每帧先算一次视角基
+   （V/E/N 三个向量），每个点变成 3 个点积、零分配。
+2. **279 次 fill/stroke**：128 个陆地环每环各自 beginPath/fill/stroke、16 条网格线
+   各自 stroke。→ 陆地全部环并成一个路径（一次 fill + 一次 stroke），网格并成一次
+   stroke：**279 → 9 次绘制调用**（vello/canvas 每次 fill 是一个 render pass，
+   端上这才是大头）。
+3. **小点档位的重叠绘制**：密集区（欧洲）上千个 1.6px 点叠在同一片像素上。
+   → dot < 2px 时按 ~2.5px 屏幕格子去重（数据按 votes 降序，热门台先占格子），
+   视觉不变、overdraw 大降；放大后点距拉开，去重自然失效、全部照画。
+
+bench（桌面 bun、stub ctx、7,991 点全量）：0.440 → 0.283 ms/帧 JS 侧；
+验证：web 拖动+自动播放全链路照旧，iOS 像素统计与优化前逐项一致（80.4/11.9/6.9）。
+
+两个坑：
+- **Ctx2D 的渐变对象活不过当帧**：缓存 `createRadialGradient` 的结果跨帧复用，
+  GPU host 上整块画布变黑（web 上 DOM ctx 常驻所以没暴露）。每帧重建即可，代价可忽略。
+- **agent macos 驱动截图全黑是工具限制**：驱动模式没有真实 GPU 表面
+  （日志 `GPU module … missing baked identity`），canvas 全黑；真实启动
+  `open Airwave.app` + `screencapture -R` 窗口区域验证渲染正常（dark 80.5%）。
+  iOS 驱动模式有 GPU 表面，可照常截图。
