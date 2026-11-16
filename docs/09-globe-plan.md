@@ -48,19 +48,27 @@
 
 ## 3. 架构设计（采用方案：canvas 自绘正交投影地球仪）
 
-### 3.1 数据层：全量站点数据集
+### 3.1 数据层：内置种子 + 启动刷新（2026-11-17 实测修订）
 
-实测（de1 节点，2026-11-16）：
+实测（de1 节点，`/json/stats` + 全量拉取）：
 
-- `limit=20000` → **502 Bad Gateway**（服务端截断）；`limit=8000` 成功：**10MB 原始 JSON、12s**。
-- 裁剪字段（uuid/name/url_resolved/geo_lat/geo_long/favicon/codec/bitrate/countrycode/首 tag）后 **1.88MB**，gzip **0.84MB**（传输体积）。
+| 数据集 | 行数 | 原始 JSON | 裁剪后* | gzip |
+| --- | --- | --- | --- | --- |
+| 全库（含断链） | 52,843 | ~66MB（推算） | ~12.5MB（推算） | ~5.6MB（推算） |
+| https 且未断（可播范围） | ~34,000 | — | ~8MB（推算） | ~3.6MB（推算） |
+| **带坐标 + https + 未断（地球仪全量）** | **8,794（已拉全：12k 请求只回 8,794 行，自然终止）** | 10.99MB | **2.08MB** | **0.93MB** |
 
-设计：
+\* 裁剪 = uuid/name/url_resolved/geo_lat/geo_long/favicon/codec/bitrate/countrycode/首 tag 十字段；推算按实测每行 ~236B、gzip 比率 0.45。
 
-1. **分块拉取**：每块 `limit=2500&offset=…&order=votes&reverse=true&has_geo_info=true&hidebroken=true&is_https=true`，逐块进 globe；返回不足 2500 行即停。块到达即上屏（地球渐次变亮，天然进度反馈），不用等全量。
-2. **持久缓存**：合并后写 `app:/cache/globe.json`（裁剪后的紧凑数组，grants 加 `fs.write app:/cache`），下次启动秒出。**无 TTL**——数据源禁 `Date.now()`（确定性环境，`analyze-ambient-api`），改为显式「刷新」按钮 + 失败不覆盖旧缓存。
-3. **内存形态**：模块级 `Float64Array`（lat/lon 各一）+ 平行 `Station[]`（点击与播放用），8-14k 行在 Hermes 64MB 堆下约 4-6MB，安全。
-4. 预计总量：带 geo 的 https 未断站 **约 0.8-1.2 万**（8000 名开外 votes 已为 0；实现时以分块自然终止为准，不预设总数）。
+**结论：地球仪数据集体积 ≈ 1MB gzip，完全内置。**
+
+设计（三层）：
+
+1. **内置种子（离线秒开）**：快照生成为 `airwave/data/globe-seed.ts` 模块（紧凑数组字面量），`app.ts` 直接 import——**不能用 `assets/` 文件**：`storage.fs` 的读写域只有 `app:/data|cache|tmp`（contract-for-humans.md:900），数据模块读不到打包资产；TS 模块导入是四端唯一同构通道。四端首开即有 8,794 个点，零网络。仓库脚本 `scripts/snapshot-globe.sh` 负责再生成。
+2. **启动后台刷新（「每隔一段时间」的实现）**：数据源禁 `Date.now()/setInterval`（contract-for-humans.md:906，运行时拒绝），无法做 TTL；改为**每次启动后台拉一遍**（3 块 × 3,000 行分页），成功后原子写 `app:/cache/globe.json`，下次启动优先读缓存文件、无则回落种子。旧数据一直顶到新数据落盘，失败不覆盖。对电台库这种慢变数据，「每次打开自动更新」已覆盖「每隔一段时间刷新」的语义；若以后想要严格的 N 天 TTL，Contract 的 `performanceNow()` 可以作为参数传进数据源做新旧对比（grammar 已确认存在）。
+3. **手动刷新按钮**：地球仪角落放刷新钮，立即走一遍刷新并给出结果 toast。
+
+**不内置全库（52,843）**：gzip ~5.6MB 会把 web 端 app.js 从 320KB 撑到 ~6MB，换来离线长尾搜索——但搜索排序（点击量/相关度）在服务端，本地还得自建索引；列表/类型/国家走现有 API+LRU 已够。真要完全离线，列为后续增强（native 内置全量 / web 懒加载分叉）。
 
 ### 3.2 渲染层：正交投影绘制管线
 
@@ -106,7 +114,7 @@
 | --- | --- | --- |
 | 万级圆点每帧 canvas 2D | 背半球剔除后 ~一半；聚合后低缩放实际绘制 ≤2k 圆 | vello(Apple)/Skia(web) 都吃得住 fillRect/arc 批量；实测不行就改 `putImageData` 点阵（types.d.ts 已含） |
 | state→args→重绘链路延迟 | 与现有瓦片地图同机制（每 pointermove 重排一次），四端已验证 | 不新增风险；必要时拖动中降采样、松手全量 |
-| 首次拉取 12s/10MB | 分块渐进上屏 + 磁盘缓存二次启动秒出 | 失败保留旧缓存；WiFi 场景可接受 |
+| 首次拉取 12s/10MB | **种子已内置，首次也秒开**；启动后台刷新不打扰 | 失败保留旧数据；WiFi 场景可接受 |
 | `Bad Gateway`（大 limit） | 已实测 | 固定 2500/块分页，自然终止 |
 | Hermes 64MB 堆 | 8-14k 行结构化 ~6MB | 数值列用 TypedArray，不存冗余字段 |
 | 正交投影在两极 | 纬度钳 ±85°，网格线极区收敛 | 纯数学，无依赖 |
