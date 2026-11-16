@@ -138,8 +138,6 @@ component App
   state langName = ""
   state codec = ""
   state lastVol = 1
-  state sleepMin = 0
-  state sleepLeft = 0
 
   derive cur = top(nav)
   derive inNow = cur.name == "nowHome" or cur.name == "nowRadio" or cur.name == "nowFavorites"
@@ -220,8 +218,6 @@ component App
     after(500, widenArea)
   task spinTick when spinning
     every(45, spinFrame)
-  task sleepTick when sleepLeft > 0
-    every(60000, sleepDown)
 
   action pick(name: string)
     nav = select(nav, name)
@@ -418,19 +414,6 @@ component App
       volume = 0
     else
       volume = (lastVol > 0 ? lastVol : 0.8)
-
-  action cycleSleep
-    let next = (sleepMin == 0 ? 15 : sleepMin == 15 ? 30 : sleepMin == 30 ? 60 : 0)
-    sleepMin = next
-    sleepLeft = next
-
-  action sleepDown
-    if sleepLeft > 0
-      let next = sleepLeft - 1
-      sleepLeft = next
-      if next == 0
-        wantPlay = false
-        sleepMin = 0
 
   action bootRadio
     if cur.name == "home"
@@ -1038,13 +1021,6 @@ component App
                               path d="M12 5l7 7-7 7" fill="none" stroke="AccentColor" stroke-width=2.4 stroke-linecap="round"
                     column gap=8
                       row align-items="center" gap=10
-                        button press=cycleSleep testId="panel-sleep" aria-label="睡眠定时" appearance="none" padding=0
-                          row align-items="center" gap=4 padding="4px 9px" border-radius=999
-                            background-color=(sleepLeft > 0 ? "AccentColor" : "-exact-secondary-background")
-                            image "symbol:moon" width=14 height=14
-                              color=(sleepLeft > 0 ? "#FFFFFF" : "-exact-secondary-label")
-                            text (sleepLeft > 0 ? `${sleepLeft} 分` : "定时") font="-exact-caption2"
-                              color=(sleepLeft > 0 ? "#FFFFFF" : "-exact-secondary-label")
                         input type="range" value=volume input=setVolume min=0 max=1 step=0.05 flex=1 testId="panel-volume"
                         button press=toggleMute aria-label=(volume > 0 ? "静音" : "取消静音") appearance="none" padding=2 testId="panel-mute"
                           image (volume > 0 ? "symbol:speaker" : "symbol:speaker-mute") width=16 height=16 color="-exact-secondary-label"

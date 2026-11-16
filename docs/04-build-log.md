@@ -648,7 +648,7 @@ view width=116 height=116 border-radius=14 position="relative" overflow="hidden"
 - 验证：重新发布后 `/`、`/radio`、`/tag/jazz`、`/nope` 全部 200 且返回同一 shell。
 - 教训：Pages 上「SPA 回落」只留一套机制（`_redirects`）；别同时放 `404.html`，两者会打架。
 
-## 43. 优化轮：五个老 bug + 睡眠定时 + 静音记忆 + 骨架屏 + 缓存 LRU
+## 43. 优化轮：五个老 bug + 静音记忆 + 骨架屏 + 缓存 LRU
 
 **修的 bug（都是通读代码找出来的）：**
 
@@ -666,11 +666,8 @@ view width=116 height=116 border-radius=14 position="relative" overflow="hidden"
 5. **`widenArea` 越界**：`4500 * 3 = 13500` 超过 6000 上限，改 `min(areaRadius * 3, 6000)`；
    `areaKm` 文案「1.5 千公里」→「1500 公里」。
 
-**新功能：**
+**新功能（睡眠定时当晚又被要求移除，见 §44）：**
 
-- **睡眠定时**：面板音量行加 moon 芯片（`panel-sleep`），15→30→60→关 循环，激活时 AccentColor 底白字、
-  显示剩余 `${sleepLeft} 分`；`task sleepTick when sleepLeft > 0 every(60000, sleepDown)`，倒数到 0
-  自动 `wantPlay = false`。README 截图 caption 之前就写了睡眠定时，这次补上了真的。
 - **静音记忆**：`toggleMute` 静音时把音量存进 `lastVol`，再点恢复（默认 0.8 兜底）。
 - **发现页骨架屏**：`discoverLoading`（pending 且空）时 4 行 pulse 占位，不再白屏等首屏。
 - **feed 缓存 LRU**：去掉 `want <= PAGE` 就丢缓存重抓的行为（切 tab 回来必重 fetch）；改为会话内
@@ -679,9 +676,16 @@ view width=116 height=116 border-radius=14 position="relative" overflow="hidden"
 
 **这次的语法/测试教训：**
 
-- **action 内的读是「动作开始时」的值**：`sleepLeft = sleepMin` 读到旧值（编译器有
-  `analyze-read-after-assign` 警告，`cycleSleep`/`sleepDown` 都要 `let next = …` 先算）。写法：
-  `let next = (三元); sleepMin = next; sleepLeft = next`。
-- 测试里 tap 之后要 `clock +1`（或 `clock settle`）状态才落地；`every(60000)` 的任务在测试假时钟下
-  `clock +900000` 会逐分钟触发，可以直接测完整倒计时。
-- 测试从 11 个加到 13 个（睡眠定时循环/倒数/暂停、静音记忆），13/13 绿。
+- **action 内的读是「动作开始时」的值**：`b = a` 读到的是旧 `a`（编译器有 `analyze-read-after-assign`
+  警告）。写法：`let next = (三元); a = next; b = next`。
+- 测试里 tap 之后要 `clock +1`（或 `clock settle`）状态才落地；`every(N)` 的任务在测试假时钟下
+  `clock +N×k` 会逐次触发。
+- 测试从 11 个加到 12 个（静音记忆），12/12 绿。
+
+## 44. 第二次移除睡眠定时（别再加了）
+
+用户在 §43 当晚要求整块移除。这是本项目**第二次**「加了又删」睡眠定时（第一次见 §38）：
+涉及 `state sleepMin/sleepLeft`、`action cycleSleep/sleepDown`、`task sleepTick`、
+面板里的 moon 芯片（`panel-sleep`）、测试「the sleep timer cycles, counts down and pauses」、
+README 两处文案。`docs/images/ios-player.png` 截图里如果拍到过 moon 芯片，重截即可（UI 里已无此按钮）。
+**结论：睡眠定时不再加回来，除非用户主动要。**

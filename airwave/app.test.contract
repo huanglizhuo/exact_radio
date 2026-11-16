@@ -94,36 +94,6 @@ test "the now-playing surface is a route, not an overlay"
   clock settle
   expect text "title-home" == "发现"
 
-test "the sleep timer cycles, counts down and pauses"
-  clock settle
-  tap "tab-home"
-  clock data
-  tap "station-b1201e74-2979-44d8-866e-02f74347a8d0"
-  clock data
-  tap "player-open"
-  clock settle
-  expect state sleepLeft == 0
-  tap "panel-sleep"
-  clock +1
-  expect state sleepLeft == 15
-  tap "panel-sleep"
-  clock +1
-  expect state sleepLeft == 30
-  tap "panel-sleep"
-  clock +1
-  expect state sleepLeft == 60
-  tap "panel-sleep"
-  clock +1
-  expect state sleepLeft == 0
-  tap "panel-sleep"
-  clock +1
-  expect state sleepLeft == 15
-  clock +61000
-  expect state sleepLeft == 14
-  clock +900000
-  expect state sleepLeft == 0
-  expect state wantPlay == false
-
 test "muting remembers the volume it left"
   clock settle
   tap "tab-home"
