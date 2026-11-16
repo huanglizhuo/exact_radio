@@ -22,17 +22,34 @@ export type Dataset = {
   rows: SeedRow[];
   lats: Float64Array;
   lons: Float64Array;
+  // Unit 3D vectors (x toward lon 0, y toward lon 90°E, z the north pole),
+  // computed once so a frame of painting is three dot products per point
+  // instead of a handful of trig calls and a fresh {x, y, visible} object.
+  px: Float64Array;
+  py: Float64Array;
+  pz: Float64Array;
 };
 
 export function buildDataset(rows: SeedRow[], origin: Dataset['origin']): Dataset {
   const n = rows.length;
   const lats = new Float64Array(n);
   const lons = new Float64Array(n);
+  const px = new Float64Array(n);
+  const py = new Float64Array(n);
+  const pz = new Float64Array(n);
   for (let i = 0; i < n; i += 1) {
-    lats[i] = rows[i][3];
-    lons[i] = rows[i][4];
+    const lat = rows[i][3];
+    const lon = rows[i][4];
+    lats[i] = lat;
+    lons[i] = lon;
+    const phi = lat * RAD;
+    const lam = lon * RAD;
+    const cphi = Math.cos(phi);
+    px[i] = cphi * Math.cos(lam);
+    py[i] = cphi * Math.sin(lam);
+    pz[i] = Math.sin(phi);
   }
-  return { origin, rows, lats, lons };
+  return { origin, rows, lats, lons, px, py, pz };
 }
 
 export function parseSeed(text: string): SeedRow[] {
@@ -142,40 +159,44 @@ const GRATICULE = 'rgba(148, 163, 184, 0.16)';
 const LAND_FILL = 'rgba(148, 163, 184, 0.30)';
 const LAND_EDGE = 'rgba(148, 163, 184, 0.42)';
 const DOT = 'rgba(52, 211, 153, 0.9)';
-const DOT_DIM = 'rgba(52, 211, 153, 0.55)';
 const CUR_DOT = '#34d399';
 const RETICLE = 'rgba(255, 255, 255, 0.9)';
 
-function strokeGraticule(
-  ctx: Ctx2D,
-  lat0: number,
-  lon0: number,
-  R: number,
-  cx: number,
-  cy: number,
-  fixed: number,
-  isLat: boolean,
-): void {
-  let pen = false;
-  ctx.beginPath();
-  for (let step = -80; step <= 80; step += 5) {
-    const lat = isLat ? fixed : step;
-    const lon = isLat ? step : fixed;
-    const p = project(lat, lon, lat0, lon0);
-    if (!p.visible) {
-      pen = false;
-      continue;
+// Land as unit vectors too, built once: [x, y, z] per vertex, ring starts.
+let landVec: Float64Array | null = null;
+let landStart: Uint32Array | null = null;
+function landGeometry(): { vec: Float64Array; start: Uint32Array } {
+  if (!landVec || !landStart) {
+    const start = new Uint32Array(LAND.length + 1);
+    let n = 0;
+    for (const ring of LAND) n += ring.length / 2;
+    const vec = new Float64Array(n * 3);
+    let v = 0;
+    let r = 0;
+    for (const ring of LAND) {
+      start[r] = v / 3;
+      r += 1;
+      for (let i = 0; i < ring.length; i += 2) {
+        const phi = ring[i + 1] * RAD;
+        const lam = ring[i] * RAD;
+        const cphi = Math.cos(phi);
+        vec[v] = cphi * Math.cos(lam);
+        vec[v + 1] = cphi * Math.sin(lam);
+        vec[v + 2] = Math.sin(phi);
+        v += 3;
+      }
     }
-    const x = cx + R * p.x;
-    const y = cy - R * p.y;
-    if (pen) ctx.lineTo(x, y);
-    else {
-      ctx.moveTo(x, y);
-      pen = true;
-    }
+    start[r] = v / 3;
+    landVec = vec;
+    landStart = start;
   }
-  ctx.stroke();
+  return { vec: landVec, start: landStart };
 }
+
+// Screen-space cell dedup for the small-dot zooms: one dot per ~2.5px cell,
+// first come (the set is votes-ordered) wins. Visually identical, a fraction
+// of the overdraw where stations cluster.
+const dedup = new Set<number>();
 
 export function paintGlobe(ctx: Ctx2D, frame: Frame, args: Paint, dataset: Dataset | null, loading: boolean): boolean {
   const { width, height } = frame;
@@ -183,6 +204,23 @@ export function paintGlobe(ctx: Ctx2D, frame: Frame, args: Paint, dataset: Datas
   const cy = height / 2;
   const R = Math.min(radiusFor(args.zoom), Math.max(width, height));
   const { lat: lat0, lon: lon0 } = args;
+
+  // The view basis: centre V, east E, north N. Every projected point below is
+  // dot products against these — no per-point trig, no allocations.
+  const phi0 = lat0 * RAD;
+  const lam0 = lon0 * RAD;
+  const s0 = Math.sin(phi0);
+  const c0 = Math.cos(phi0);
+  const sl0 = Math.sin(lam0);
+  const cl0 = Math.cos(lam0);
+  const Vx = c0 * cl0;
+  const Vy = c0 * sl0;
+  const Vz = s0;
+  const Ex = -sl0;
+  const Ey = cl0;
+  const Nx = -s0 * cl0;
+  const Ny = -s0 * sl0;
+  const Nz = c0;
 
   ctx.clearRect(0, 0, width, height);
 
@@ -201,54 +239,118 @@ export function paintGlobe(ctx: Ctx2D, frame: Frame, args: Paint, dataset: Datas
   ctx.arc(cx, cy, R, 0, Math.PI * 2);
   ctx.clip();
 
-  // Graticule every 30°.
+  // Graticule every 30°, all of it in one path and one stroke.
   ctx.strokeStyle = GRATICULE;
   ctx.lineWidth = 1;
-  for (let lon = -180; lon < 180; lon += 30) strokeGraticule(ctx, lat0, lon0, R, cx, cy, lon, false);
-  for (let lat = -60; lat <= 60; lat += 30) strokeGraticule(ctx, lat0, lon0, R, cx, cy, lat, true);
+  ctx.beginPath();
+  for (let lon = -180; lon < 180; lon += 30) {
+    const lam = lon * RAD;
+    let pen = false;
+    for (let step = -80; step <= 80; step += 5) {
+      const phi = step * RAD;
+      const cphi = Math.cos(phi);
+      const wx = cphi * Math.cos(lam);
+      const wy = cphi * Math.sin(lam);
+      const wz = Math.sin(phi);
+      const d = Vx * wx + Vy * wy + Vz * wz;
+      if (d <= -0.015) {
+        pen = false;
+        continue;
+      }
+      const x = cx + R * (Ex * wx + Ey * wy);
+      const y = cy - R * (Nx * wx + Ny * wy + Nz * wz);
+      if (pen) ctx.lineTo(x, y);
+      else {
+        ctx.moveTo(x, y);
+        pen = true;
+      }
+    }
+  }
+  for (let lat = -60; lat <= 60; lat += 30) {
+    const phi = lat * RAD;
+    const wz = Math.sin(phi);
+    const cphi = Math.cos(phi);
+    let pen = false;
+    for (let step = -180; step <= 180; step += 5) {
+      const lam = step * RAD;
+      const wx = cphi * Math.cos(lam);
+      const wy = cphi * Math.sin(lam);
+      const d = Vx * wx + Vy * wy + Vz * wz;
+      if (d <= -0.015) {
+        pen = false;
+        continue;
+      }
+      const x = cx + R * (Ex * wx + Ey * wy);
+      const y = cy - R * (Nx * wx + Ny * wy + Nz * wz);
+      if (pen) ctx.lineTo(x, y);
+      else {
+        ctx.moveTo(x, y);
+        pen = true;
+      }
+    }
+  }
+  ctx.stroke();
 
   // Land: vertices behind the horizon are clamped out onto the limb, so a
   // continent sliding off the edge folds onto the rim instead of vanishing.
+  // All rings share one path — one fill and one stroke for the whole world.
+  const { vec, start } = landGeometry();
+  ctx.beginPath();
+  for (let r = 0; r < start.length - 1; r += 1) {
+    const end = start[r + 1];
+    for (let i = start[r]; i < end; i += 1) {
+      const j = i * 3;
+      const wx = vec[j];
+      const wy = vec[j + 1];
+      const wz = vec[j + 2];
+      const d = Vx * wx + Vy * wy + Vz * wz;
+      let x: number;
+      let y: number;
+      if (d > -0.015) {
+        x = cx + R * (Ex * wx + Ey * wy);
+        y = cy - R * (Nx * wx + Ny * wy + Nz * wz);
+      } else {
+        // Pull the invisible vertex onto the limb along its screen direction.
+        const sx = Ex * wx + Ey * wy;
+        const sy = Nx * wx + Ny * wy + Nz * wz;
+        const len = Math.hypot(sx, sy) || 1;
+        x = cx + (R * sx) / len;
+        y = cy - (R * sy) / len;
+      }
+      if (i === start[r]) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+  }
   ctx.fillStyle = LAND_FILL;
   ctx.strokeStyle = LAND_EDGE;
   ctx.lineWidth = 0.8;
-  for (const ring of LAND) {
-    ctx.beginPath();
-    let any = false;
-    for (let i = 0; i < ring.length; i += 2) {
-      const p = project(ring[i + 1], ring[i], lat0, lon0);
-      let x: number;
-      let y: number;
-      if (p.visible) {
-        x = cx + R * p.x;
-        y = cy - R * p.y;
-      } else {
-        const len = Math.hypot(p.x, p.y) || 1;
-        x = cx + (R * p.x) / len;
-        y = cy - (R * p.y) / len;
-      }
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-      any = true;
-    }
-    if (any) {
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-    }
-  }
+  ctx.fill();
+  ctx.stroke();
 
   // Station dots.
   if (dataset && dataset.rows.length > 0) {
     const dot = args.zoom >= 4 ? 2.6 : args.zoom >= 3 ? 2.1 : 1.6;
     ctx.fillStyle = DOT;
     ctx.beginPath();
-    const { lats, lons, rows } = dataset;
-    for (let i = 0; i < rows.length; i += 1) {
-      const p = project(lats[i], lons[i], lat0, lon0);
-      if (!p.visible) continue;
-      const x = cx + R * p.x;
-      const y = cy - R * p.y;
+    const { px, py, pz, rows } = dataset;
+    const n = rows.length;
+    const merge = dot < 2; // dense small dots: one per screen cell
+    dedup.clear();
+    for (let i = 0; i < n; i += 1) {
+      const wx = px[i];
+      const wy = py[i];
+      const wz = pz[i];
+      if (Vx * wx + Vy * wy + Vz * wz <= -0.015) continue;
+      const x = cx + R * (Ex * wx + Ey * wy);
+      const y = cy - R * (Nx * wx + Ny * wy + Nz * wz);
+      if (merge) {
+        const kx = (x * 0.4) | 0; // ~2.5px cells
+        const ky = (y * 0.4) | 0;
+        const k = kx * 67108864 + ky;
+        if (dedup.has(k)) continue;
+        dedup.add(k);
+      }
       ctx.moveTo(x + dot, y);
       ctx.arc(x, y, dot, 0, Math.PI * 2);
     }
@@ -256,10 +358,13 @@ export function paintGlobe(ctx: Ctx2D, frame: Frame, args: Paint, dataset: Datas
 
     // The station on air: a bright ring plus its name when zoomed in.
     if (args.curId !== '') {
-      const p = project(args.curLat, args.curLon, lat0, lon0);
-      if (p.visible) {
-        const x = cx + R * p.x;
-        const y = cy - R * p.y;
+      const cphi = Math.cos(args.curLat * RAD);
+      const wx = cphi * Math.cos(args.curLon * RAD);
+      const wy = cphi * Math.sin(args.curLon * RAD);
+      const wz = Math.sin(args.curLat * RAD);
+      if (Vx * wx + Vy * wy + Vz * wz > -0.015) {
+        const x = cx + R * (Ex * wx + Ey * wy);
+        const y = cy - R * (Nx * wx + Ny * wy + Nz * wz);
         ctx.beginPath();
         ctx.arc(x, y, dot + 3.5, 0, Math.PI * 2);
         ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
