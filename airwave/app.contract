@@ -63,10 +63,6 @@ fn saved(xs: Station[], id: string): bool =
 fn detailOf(s: Station): string =
   (s.country == "" ? s.codec : `${s.country} · ${s.codec}`) + (s.bitrate > 0 ? ` · ${s.bitrate} kbps` : "")
 
-
-
-
-
 fn nearKm(z: number): number =
   z <= 1 ? 3000 : z == 2 ? 1500 : z == 3 ? 800 : z == 4 ? 400 : z == 5 ? 200 : z == 6 ? 100 : 50
 
@@ -140,7 +136,6 @@ component App
   derive langLabel = lang == "" ? "语言" : langName
   derive globeRefreshing = pending(globeData)
   derive globeOriginLabel = (globeData.origin == "seed" ? "内置数据" : globeData.origin == "cache" ? "已缓存" : globeData.origin == "net" ? "已更新" : "")
-  derive pickRadius = nearKm(mapZoom)
   derive pickedRev = match first(picked) { case some(p) => p.rev, case none => -1 }
 
   resource discoverList = feed("discover", "", "", want, "", "") as shape Station[] else empty()
@@ -154,7 +149,7 @@ component App
   resource globeData = globeLoad(globeRev) as shape GlobeData else empty()
   resource pins = mapPins(pickLat, pickLon, pickZoom, globeData.count) as shape MapMarker[] else empty()
   resource pickStation = stationById(selId, globeLat, globeLon) when selId != "" as shape Station else empty()
-  resource picked = randomStation(dialRev, currentId, pickLat, pickLon, pickRadius) when dialRev > 0 as shape DialPick[] else empty()
+  resource picked = randomStation(dialRev, currentId, pickLat, pickLon, nearKm(pickZoom)) when dialRev > 0 as shape DialPick[] else empty()
 
   mutation savedList as shape Reply refreshes favs
   mutation logged as shape Reply refreshes recent
@@ -176,9 +171,6 @@ component App
     after(600, bumpGlobe)
   task pickPlay when selId != "" and selId != playedPick and not pending(pickStation) and pickStation.id != ""
     after(30, playPick)
-
-  action pick(name: string)
-    nav = select(nav, name)
 
   action follow(target: string)
     nav = go(nav, target)
@@ -203,9 +195,6 @@ component App
     want = 40
     nav = go(nav, "/search")
     send recorded = pushSearch(q)
-
-  action goBack
-    nav = back(nav)
 
   action noop
     draft = draft
@@ -277,8 +266,6 @@ component App
 
   action pausedNow
     status = "paused"
-
-  action loaded
 
   action failed(code: string)
     let fallbackReady = match current { case some(s) => (not triedFallback) and s.fallback != "", case none => false }
@@ -411,9 +398,8 @@ component App
 
 
   action onKey(k: string)
-    if k == "Escape"
-      if inNow
-        nav = back(nav)
+    if k == "Escape" and inNow
+      nav = back(nav)
 
   view
     main testId="app" viewport-fit="cover" width="100%" height="100%" background-color="-exact-background"
@@ -425,7 +411,7 @@ component App
             audio src=curStream paused=(not wantPlay) volume=volume
               metadata=MediaMetadata(title=s.name, artist=s.tagline, album="Airwave", artwork=s.favicon)
               play=started playing=started pause=pausedNow ended=pausedNow
-              loadedmetadata=loaded error=failed
+              error=failed
               nexttrack=nextStation
           case none
             view width=0 height=0
@@ -542,17 +528,7 @@ component App
                   list testId=`feed-${e.name}` appearance="none" virtualized=true flex=1 min-height=0
                     estimated-item-height=64 reachend=loadMore reach-margin="60%"
                     for s in (e.name == "tag" ? tagList : countryList) key=s.id
-                      row press=play(s) testId=`station-${s.id}` gap=12 align-items="center" padding="6px 16px" border-bottom="1px solid -exact-separator"
-                        if s.favicon != ""
-                          image s.favicon width=52 height=52 border-radius=12
-                        else
-                          view width=52 height=52 border-radius=12 background-color="-exact-tertiary-background" align-items="center" justify-content="center"
-                            image "symbol:radio" width=22 height=22 color="-exact-secondary-label"
-                        column flex=1 gap=2 min-width=0
-                          text s.name font="-exact-subheadline" line-clamp=1
-                          text s.tagline font="-exact-caption2" color="-exact-secondary-label" line-clamp=1
-                        if s.id == currentId
-                          image "symbol:waveform" width=18 height=18 color="AccentColor"
+                      StationRow(s=s, onTap=play(s), active=(s.id == currentId))
 
               else if e.name == "search"
                 column gap=10 padding="8px 16px 10px"
@@ -638,17 +614,7 @@ component App
                   list testId="feed-search" appearance="none" virtualized=true flex=1 min-height=0
                     estimated-item-height=64 reachend=loadMore reach-margin="60%"
                     for s in found key=s.id
-                      row press=play(s) testId=`station-${s.id}` gap=12 align-items="center" padding="6px 16px" border-bottom="1px solid -exact-separator"
-                        if s.favicon != ""
-                          image s.favicon width=52 height=52 border-radius=12
-                        else
-                          view width=52 height=52 border-radius=12 background-color="-exact-tertiary-background" align-items="center" justify-content="center"
-                            image "symbol:radio" width=22 height=22 color="-exact-secondary-label"
-                        column flex=1 gap=2 min-width=0
-                          text s.name font="-exact-subheadline" line-clamp=1
-                          text s.tagline font="-exact-caption2" color="-exact-secondary-label" line-clamp=1
-                        if s.id == currentId
-                          image "symbol:waveform" width=18 height=18 color="AccentColor"
+                      StationRow(s=s, onTap=play(s), active=(s.id == currentId))
 
               else if e.name == "favorites"
                 header display="flex" align-items="center" gap=8 padding="8px 16px"
@@ -663,15 +629,7 @@ component App
                 else
                   list testId="feed-favorites" flex=1 min-height=0
                     for s in favs key=s.id
-                      row press=play(s) testId=`station-${s.id}` gap=12 align-items="center" padding="6px 16px" border-bottom="1px solid -exact-separator"
-                        if s.favicon != ""
-                          image s.favicon width=52 height=52 border-radius=12
-                        else
-                          view width=52 height=52 border-radius=12 background-color="-exact-tertiary-background" align-items="center" justify-content="center"
-                            image "symbol:radio" width=22 height=22 color="-exact-secondary-label"
-                        column flex=1 gap=2 min-width=0
-                          text s.name font="-exact-subheadline" line-clamp=1
-                          text s.tagline font="-exact-caption2" color="-exact-secondary-label" line-clamp=1
+                      StationRow(s=s, onTap=play(s), active=(s.id == currentId))
 
               else if e.name == "radio"
                 column flex=1 min-height=0 position="relative" testId="radio-face"
@@ -730,8 +688,7 @@ component App
                         text curTagline font="-exact-footnote" color="-exact-secondary-label" text-align="center" line-clamp=1
                         row gap=8 align-items="center"
                           if wantPlay
-                            row padding="2px 7px" border-radius=6 background-color="#E5484D"
-                              text "LIVE" font="-exact-caption2" font-weight=700 color="#FFFFFF"
+                            LiveBadge()
                           text curDetail font="-exact-caption2" color="-exact-secondary-label"
                     if failedPlayer
                       row align-items="center" gap=8
@@ -758,9 +715,7 @@ component App
                             image "symbol:circle" width=22 height=22 color="AccentColor"
                               animation="pulse 1s ease-in-out infinite"
                           else
-                            svg width=22 height=22 viewBox="0 0 24 24"
-                              path d="M5 5l7 7-7 7" fill="none" stroke="AccentColor" stroke-width=2.4 stroke-linecap="round"
-                              path d="M12 5l7 7-7 7" fill="none" stroke="AccentColor" stroke-width=2.4 stroke-linecap="round"
+                            NextIcon(size=22)
                     column gap=8
                       row align-items="center" gap=10
                         input type="range" value=volume input=setVolume min=0 max=1 step=0.05 flex=1 testId="panel-volume"
@@ -784,8 +739,7 @@ component App
                 text curName font="-exact-subheadline" line-clamp=1 testId="player-name"
                 text curTagline font="-exact-caption2" color="-exact-secondary-label" line-clamp=1
             if wantPlay
-              row padding="2px 7px" border-radius=6 background-color="#E5484D"
-                text "LIVE" font="-exact-caption2" font-weight=700 color="#FFFFFF"
+              LiveBadge()
             button press=togglePlay testId="player-toggle" aria-label=(wantPlay ? "暂停" : "播放") appearance="none" padding=0
               column width=44 height=44 border-radius=22 align-items="center" justify-content="center"
                 if busy
@@ -799,9 +753,7 @@ component App
                 if busy
                   image "symbol:circle" width=18 height=18 color="AccentColor" animation="pulse 1s ease-in-out infinite"
                 else
-                  svg width=20 height=20 viewBox="0 0 24 24"
-                    path d="M5 5l7 7-7 7" fill="none" stroke="AccentColor" stroke-width=2.4 stroke-linecap="round"
-                    path d="M12 5l7 7-7 7" fill="none" stroke="AccentColor" stroke-width=2.4 stroke-linecap="round"
+                  NextIcon(size=20)
           else
             row press=tune align-items="center" gap=10 flex=1 min-width=0
               view width=40 height=40 border-radius=10 background-color="-exact-tertiary-background"
@@ -815,9 +767,7 @@ component App
                   if busy
                     image "symbol:circle" width=18 height=18 color="AccentColor" animation="pulse 1s ease-in-out infinite"
                   else
-                    svg width=20 height=20 viewBox="0 0 24 24"
-                      path d="M5 5l7 7-7 7" fill="none" stroke="AccentColor" stroke-width=2.4 stroke-linecap="round"
-                      path d="M12 5l7 7-7 7" fill="none" stroke="AccentColor" stroke-width=2.4 stroke-linecap="round"
+                    NextIcon(size=20)
 
       row role="tablist" testId="tabs" appearance="none" position="absolute" left=12 right=12 bottom=24 height=56
         max-width="22rem" margin-left="auto" margin-right="auto" border-radius=28 align-items="stretch"
@@ -843,3 +793,37 @@ component App
           display="flex" flex-direction="column" align-items="center" justify-content="center" gap=2 max-width="12rem"
           image "symbol:star" width=22 height=22 color=(nav.tab == "favorites" ? "AccentColor" : "-exact-secondary-label")
           text "收藏" font="-exact-caption2" color=(nav.tab == "favorites" ? "AccentColor" : "-exact-secondary-label")
+
+// One station in any list — art (or the radio glyph), name, tagline, and a
+// mark on whatever is playing. Shared by the tag, country, search and
+// favorites feeds.
+component StationRow
+  props
+    s: Station
+    onTap: action
+    active: bool
+  view
+    row press=onTap testId=`station-${s.id}` gap=12 align-items="center" padding="6px 16px" border-bottom="1px solid -exact-separator"
+      if s.favicon != ""
+        image s.favicon width=52 height=52 border-radius=12
+      else
+        view width=52 height=52 border-radius=12 background-color="-exact-tertiary-background" align-items="center" justify-content="center"
+          image "symbol:radio" width=22 height=22 color="-exact-secondary-label"
+      column flex=1 gap=2 min-width=0
+        text s.name font="-exact-subheadline" line-clamp=1
+        text s.tagline font="-exact-caption2" color="-exact-secondary-label" line-clamp=1
+      if active
+        image "symbol:waveform" width=18 height=18 color="AccentColor"
+
+component LiveBadge
+  view
+    row padding="2px 7px" border-radius=6 background-color="#E5484D"
+      text "LIVE" font="-exact-caption2" font-weight=700 color="#FFFFFF"
+
+component NextIcon
+  props
+    size: number
+  view
+    svg width=size height=size viewBox="0 0 24 24"
+      path d="M5 5l7 7-7 7" fill="none" stroke="AccentColor" stroke-width=2.4 stroke-linecap="round"
+      path d="M12 5l7 7-7 7" fill="none" stroke="AccentColor" stroke-width=2.4 stroke-linecap="round"

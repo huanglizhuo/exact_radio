@@ -837,3 +837,28 @@ iOS agent（7,013 浅绿采样）；Android 构建过、真机未连未装。
 **Swift 教训**：`#if` 不能内联 typealias（要 `#if` 块包两行）；`annotation?.title ?? nil ?? ""`
 报 optional unwrap 错，要 `(annotation?.title ?? nil) ?? ""`；macOS `NSView` 不能 `view.addSublayer`、
 要 `layer?.addSublayer` + `wantsLayer=true`；CTFontCreateUIFontForLanguage 返回可选要给 `??` 兜底。
+
+## 50. 简洁性重构：组件抽取与死代码清理
+
+用户指令（m09872）：「继续尝试代码优化让代码更加简洁」。只做结构简化，零行为变化。
+
+- **app.contract（845 → 829 行）**：抽出三个参数化组件（`component X` + `props` 块，action 可以作
+  prop 传递，`press=onTap` 是 handler-only 用法）：
+  - `StationRow(s, onTap, active)` —— 电台行在类型/国家/搜索/收藏四个列表里重复三次（收藏版还
+    缺「正在播」波形标记，统一后补上）；调用形如 `StationRow(s=s, onTap=play(s), active=(s.id == currentId))`。
+  - `LiveBadge()`（无 props，LIVE 红标 ×2）、`NextIcon(size)`（双箭头 SVG ×3）。
+  - 组件只能读 props/injects 和「声明在它上面」的名字——`currentId` 这类父级 derive 不直接可见，
+  所以按值传 `active: bool`。
+  - 删死代码：`action pick`（与 selectTab 全同、无引用）、`action goBack`（无引用）、`action loaded`
+  （空动作 + `loadedmetadata=loaded` 一起删）；`derive pickRadius` 内联为 `nearKm(pickZoom)`；
+  `onKey` 两层 if 合并为一个条件。
+- **app.ts（659 → 656 行）**：`readStations`/`readStrings`/`writeStrings`/`writeStations` 四个函数
+  收敛为 `readJson(storage, path, keep)`（keep 回调做校验+修复）+ `writeJson(storage, path, value)`；
+  三个播放列表正则收敛为共享 `const PLAYLIST`。
+- **globe.ts（103 → 102 行）**：删掉指向已删函数的尾部注释。
+- 教训：sed/python 批量替换调用点时锚点要含分号/换行（第一次 `writeStrings(storage, SEARCHES, next)`
+  没匹配上是因为实际代码带 `;`）；edit 工具删连续 action 块时容易顺手多删——`follow`/`noop`/
+  `selectTab` 都在被误删后立刻补回，`grep -n` 验证引用再动手。
+- 验证：contract build 零错误；`test web` 13/13；agent web 实测 StationRow 渲染 + 点击播放
+  （station-595687e1 → status playing → player-open → panel-name "Christmas FM Non-stop!"）+
+  tag 页 feed 正常；三端重建全过。

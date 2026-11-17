@@ -100,4 +100,3 @@ export function nearestIn(dataset: Dataset, lat: number, lon: number, want: numb
   return hits;
 }
 
-// Zoom 1..7 → the globe's radius in CSS pixels.

@@ -184,7 +184,7 @@ function seedRowOf(raw: unknown): SeedRow | null {
   if (stream.includes('${') || stream.includes('`')) return null;
   if (lat === 0 && lon === 0) return null;
   if (asNumber(row.hls) !== 0) return null;
-  if (/\.(?:m3u8|m3u|pls)(?:[?#]|$)/i.test(stream)) return null;
+  if (PLAYLIST.test(stream)) return null;
   const favicon = asString(row.favicon);
   const codec = asString(row.codec).toUpperCase();
   const tag = asString(row.tags).split(',')[0].trim();
@@ -301,10 +301,12 @@ function shortCountry(country: string): string {
   return SHORT_COUNTRY[country] ?? country.replace(/^The\s+/i, '');
 }
 
+// A playlist document is not an audio stream: no <audio> outside Safari plays it.
+const PLAYLIST = /\.(?:m3u8|m3u|pls)(?:[?#]|$)/i;
+
 // When the index's preferred address fails, the plain `url` sometimes still works.
 function fallbackFor(url: string, stream: string): string {
-  if (!/^https:\/\//i.test(url) || url === stream) return '';
-  if (/\.(?:m3u8|m3u|pls)(?:[?#]|$)/i.test(url)) return '';
+  if (!/^https:\/\//i.test(url) || url === stream || PLAYLIST.test(url)) return '';
   return url;
 }
 
@@ -316,10 +318,8 @@ function normalize(raw: unknown): Station | null {
   const stream = asString(row.url_resolved) || asString(row.url);
   if (!id || !/^https:\/\//i.test(stream)) return null;
   if (asNumber(row.hls) !== 0) return null; // HLS: Apple plays it, a browser's <audio> does not
-  // The index often says hls=0 for a .m3u8 anyway, and a playlist file is never audio:
-  // both are unplayable in <audio> on Android and in every browser but Safari.
-  if (/\.m3u8(?:[?#]|$)/i.test(stream)) return null;
-  if (/\.(?:m3u|pls)(?:[?#]|$)/i.test(stream)) return null;
+  // The index often says hls=0 for a .m3u8 anyway (see PLAYLIST above).
+  if (PLAYLIST.test(stream)) return null;
   const favicon = asString(row.favicon);
   const tags = asString(row.tags)
     .split(',')
@@ -371,46 +371,43 @@ function isStation(value: unknown): value is Station {
   return typeof s.id === 'string' && typeof s.name === 'string' && typeof s.stream === 'string';
 }
 
-async function readStations(storage: Storage, path: string): Promise<Station[]> {
+async function readJson<T>(storage: Storage, path: string, keep: (value: unknown) => T | null): Promise<T[]> {
   try {
-    const bytes = await storage.fs.readFile(path);
-    const parsed: unknown = JSON.parse(decoder.decode(bytes));
+    const parsed: unknown = JSON.parse(decoder.decode(await storage.fs.readFile(path)));
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(isStation).map((station) => ({
-      ...station,
-      frequency: Number.isFinite(station.frequency) ? station.frequency : freqOf(station.id),
-      lat: Number.isFinite(station.lat) ? station.lat : 0,
-      lon: Number.isFinite(station.lon) ? station.lon : 0,
-      fallback: typeof station.fallback === 'string' ? station.fallback : '',
-    }));
+    const out: T[] = [];
+    for (const item of parsed) {
+      const kept = keep(item);
+      if (kept !== null) out.push(kept);
+    }
+    return out;
   } catch {
     // `ENOENT` the first time, `bake` while the view builds: both are "nothing kept yet".
     return [];
   }
 }
 
-async function readStrings(storage: Storage, path: string): Promise<string[]> {
-  try {
-    const bytes = await storage.fs.readFile(path);
-    const parsed: unknown = JSON.parse(decoder.decode(bytes));
-    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string' && v.trim() !== '') : [];
-  } catch {
-    return [];
-  }
+function readStrings(storage: Storage, path: string): Promise<string[]> {
+  return readJson(storage, path, (v) => (typeof v === 'string' && v.trim() !== '' ? v : null));
 }
 
-async function writeStrings(storage: Storage, path: string, values: string[]): Promise<void> {
-  try {
-    await storage.fs.atomicWriteFile(path, encoder.encode(JSON.stringify(values)));
-  } catch (e) {
-    if ((e as { code?: string }).code === 'bake') return;
-    throw e;
-  }
+// Old saves may predate a field; everything is repaired on read.
+function readStations(storage: Storage, path: string): Promise<Station[]> {
+  return readJson(storage, path, (v) => {
+    if (!isStation(v)) return null;
+    return {
+      ...v,
+      frequency: Number.isFinite(v.frequency) ? v.frequency : freqOf(v.id),
+      lat: Number.isFinite(v.lat) ? v.lat : 0,
+      lon: Number.isFinite(v.lon) ? v.lon : 0,
+      fallback: typeof v.fallback === 'string' ? v.fallback : '',
+    };
+  });
 }
 
-async function writeStations(storage: Storage, path: string, stations: Station[]): Promise<void> {
+async function writeJson(storage: Storage, path: string, value: unknown): Promise<void> {
   try {
-    await storage.fs.atomicWriteFile(path, encoder.encode(JSON.stringify(stations)));
+    await storage.fs.atomicWriteFile(path, encoder.encode(JSON.stringify(value)));
   } catch (e) {
     if ((e as { code?: string }).code === 'bake') return;
     throw e;
@@ -620,7 +617,7 @@ const sources: Sources = {
   ): Promise<{ ok: boolean; favorited: boolean }> => {
     const kept = await readStrings(storage, SEARCHES);
     const next = [query, ...kept.filter((q) => q !== query)].slice(0, SEARCH_LIMIT);
-    await writeStrings(storage, SEARCHES, next);
+    await writeJson(storage, SEARCHES, next);
     return { ok: true, favorited: false };
   },
 
@@ -635,7 +632,7 @@ const sources: Sources = {
     const kept = await readStations(storage, FAVORITES);
     const exists = kept.some((s) => s.id === station.id);
     const next = exists ? kept.filter((s) => s.id !== station.id) : [station, ...kept];
-    await writeStations(storage, FAVORITES, next);
+    await writeJson(storage, FAVORITES, next);
     return { ok: true, favorited: !exists };
   },
 
@@ -648,7 +645,7 @@ const sources: Sources = {
     storage: Storage,
   ): Promise<{ ok: boolean; favorited: boolean }> => {
     const kept = await readStations(storage, RECENT);
-    await writeStations(storage, RECENT, [station, ...kept.filter((s) => s.id !== station.id)].slice(0, RECENT_LIMIT));
+    await writeJson(storage, RECENT, [station, ...kept.filter((s) => s.id !== station.id)].slice(0, RECENT_LIMIT));
     reportClick(station.id);
     return { ok: true, favorited: false };
   },
