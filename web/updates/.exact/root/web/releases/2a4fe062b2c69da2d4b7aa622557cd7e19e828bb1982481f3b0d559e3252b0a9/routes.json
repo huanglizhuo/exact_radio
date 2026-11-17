@@ -1,0 +1,84 @@
+{
+  "routes": [
+    {
+      "name": "home",
+      "pattern": "/",
+      "render": "client",
+      "notfound": false
+    },
+    {
+      "name": "tag",
+      "pattern": "/tag/:tag",
+      "render": "client",
+      "notfound": false
+    },
+    {
+      "name": "country",
+      "pattern": "/country/:code",
+      "render": "client",
+      "notfound": false
+    },
+    {
+      "name": "search",
+      "pattern": "/search",
+      "render": "client",
+      "notfound": false
+    },
+    {
+      "name": "nowHome",
+      "pattern": "/now",
+      "render": "client",
+      "notfound": false
+    },
+    {
+      "name": "radio",
+      "pattern": "/radio",
+      "render": "client",
+      "notfound": false
+    },
+    {
+      "name": "nowRadio",
+      "pattern": "/radio/now",
+      "render": "client",
+      "notfound": false
+    },
+    {
+      "name": "favorites",
+      "pattern": "/favorites",
+      "render": "client",
+      "notfound": false
+    },
+    {
+      "name": "nowFavorites",
+      "pattern": "/favorites/now",
+      "render": "client",
+      "notfound": false
+    },
+    {
+      "name": "notfound",
+      "pattern": "",
+      "render": "client",
+      "notfound": true
+    }
+  ],
+  "files": {
+    "audio-session.js": "audio-session-3nZpO5LL.js",
+    "picker-glue.js": "picker-glue-rrfYv2Yd.js",
+    "storage-request.js": "storage-request-HiltBKrt.js",
+    "style.css": "style-3nzZCzkS.css",
+    "app.js": "app-C5YdXvZU.js",
+    "canvas-capture-DuR_R0CA.js": "canvas-capture-DuR_R0CA.js",
+    "collection-glue-BSNk57o1.js": "collection-glue-BSNk57o1.js",
+    "ext-maps-BfFACYbs.js": "ext-maps-BfFACYbs.js",
+    "fragment-D9kbAD_i.js": "fragment-D9kbAD_i.js",
+    "input-glue-pBP4n9-9.js": "input-glue-pBP4n9-9.js",
+    "list-selection-BqFY6Q4u.js": "list-selection-BqFY6Q4u.js",
+    "list-text-B8X_bjMR.js": "list-text-B8X_bjMR.js",
+    "media-glue-BDENISg0.js": "media-glue-BDENISg0.js",
+    "native-sbR-I9Sa.js": "native-sbR-I9Sa.js",
+    "storage-environment-BZSOwY8i.js": "storage-environment-BZSOwY8i.js",
+    "symbol-roles-BgSmBZpB.js": "symbol-roles-BgSmBZpB.js",
+    "ts-body-from-CMfJ8e74.js": "ts-body-from-CMfJ8e74.js",
+    "ts-sqlite-ChWflGWU.js": "ts-sqlite-ChWflGWU.js"
+  }
+}

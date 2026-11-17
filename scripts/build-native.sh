@@ -35,11 +35,16 @@ echo "Seed filled: $(wc -c < "$SEED") bytes."
 
 source ../.tools/env.sh
 
+# OTA: every native binary carries the update store (deploy.store = "A" in
+# app.json) and production trust. EXACT_UPDATE_GENESIS=1 embeds sequence zero
+# of the "prod" stream; a binary rebuilt after releases exist can instead pass
+# EXACT_UPDATE_RECEIPT=<origin>/.exact/prod/<compat>/releases/<release>.json.
 case "$TARGET" in
-  mac)    bun exact.mjs mac ;;
-  ios)    bun exact.mjs ios ;;
+  mac)    EXACT_UPDATE_GENESIS=1 bun exact.mjs mac --release ;;
+  ios)    EXACT_UPDATE_GENESIS=1 bun exact.mjs ios --release ;;
   android) JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" \
-           bun exact.mjs android ;;
+           EXACT_UPDATE_TRUST=production EXACT_UPDATE_GENESIS=1 \
+           bun exact.mjs android --release ;;
   all)    echo "build one platform at a time: mac | ios | android" >&2; exit 2 ;;
   *)      echo "unknown target $TARGET" >&2; exit 2 ;;
 esac

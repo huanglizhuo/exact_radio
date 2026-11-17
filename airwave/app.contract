@@ -655,7 +655,7 @@ component App
                         image "symbol:radio" width=16 height=16 color="#2563EB"
                   column position="absolute" left=14 bottom=170 gap=4 align-items="flex-start"
                     if not hasCurrent or busy
-                      text (busy ? "正在换台…" : "点图钉播放电台")
+                      text (busy ? "正在换台…" : "点图钉播放电台（已热更新）")
                         font="-exact-caption1" color="#334155" testId="radio-hint"
                         background-color="rgba(255, 255, 255, 0.86)" border-radius=8 padding="3px 8px"
               else if e.name == "nowHome" or e.name == "nowRadio" or e.name == "nowFavorites"

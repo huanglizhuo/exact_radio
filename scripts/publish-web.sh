@@ -24,6 +24,14 @@ esac
 if [ "${1:-}" != "--no-web" ]; then
   rm -rf "$ROOT/web"
   cp -R dist "$ROOT/web"
+  # OTA: serve the update origin (deploy --origin "$ROOT/origin" writes it) at
+  # /updates — the channel URL in app.json is https://airwave-76y.pages.dev/updates.
+  # The client fetches <channel>/.exact/<channel>/<compat id>/exact.json.
+  if [ -d "$ROOT/origin/.exact" ]; then
+    mkdir -p "$ROOT/web/updates"
+    cp -R "$ROOT/origin/.exact" "$ROOT/web/updates/.exact"
+    echo "origin/.exact copied to web/updates/ ($(du -sh "$ROOT/web/updates" | cut -f1))"
+  fi
   cd "$ROOT"
   git add -A web
   echo

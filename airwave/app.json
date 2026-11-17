@@ -59,7 +59,18 @@
   "deploy": {
     "store": {
       "web": "0",
-      "ios": "0"
+      "ios": "A",
+      "macos": "A",
+      "android": "A"
+    },
+    "channels": {
+      "prod": "https://airwave-76y.pages.dev/updates"
+    },
+    "signing": {
+      "key": "airwave",
+      "keys": {
+        "airwave": "vX8OMyk0qKwgjqwWIRaY0ZoJ73QCGXgo8R6eiuYUFj8="
+      }
     }
   },
   "icons": [
