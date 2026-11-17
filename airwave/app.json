@@ -78,7 +78,9 @@
         "attribution": "© OpenStreetMap contributors",
         "maxZoom": 19
       },
-      "android": {}
+      "android": {
+        "apiKey": { "env": "EXACT_GOOGLE_MAPS_API_KEY" }
+      }
     }
   }
 }

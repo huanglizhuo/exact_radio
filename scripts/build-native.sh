@@ -7,6 +7,9 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT="$(cd .. && pwd)"
+# Secrets live outside git (.tools/ is gitignored); the Maps key is read at
+# build time through app.json's {"env": "..."} indirection, never committed.
+[ -f "$ROOT/.tools/secrets.sh" ] && . "$ROOT/.tools/secrets.sh"
 cd "$ROOT/airwave"
 
 TARGET="${1:-all}"
