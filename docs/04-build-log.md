@@ -933,3 +933,38 @@ APK 在 plan 含 `video`/`audio` 时自动链接——Airwave 的 `audio` 元素
   暂停/恢复（重新 tap）后新 AudioTrack 会话继续出帧。流在漫游 LTE 上约 176kbps 可拉。
 - 教训：无控件 `audio` 在 painted host 上 = display:none = 无盒 = 无播放器；排查顺序应是
   「logcat 有没有 ExoPlayer Init」而不是先怀疑网络/焦点。
+
+## 54. OTA 热更新（deploy/push 签名流 + Pages 频道 + genesis 二进制）
+
+**机制**（docs/recipes/over-the-air-updates.md）：`bun exact.mjs deploy` 分类并发布签名流到
+origin（本地目录即 CDN 源）；`push` 秒级发布工作树到已装 release 应用。客户端
+（store L=A 的二进制）fetch `<channel>/.exact/<channel>/<compat id>/exact.json`（head
+envelope ≤64KB，签名覆盖 app/channel/compat/seq）→ 按摘要取 `.exact/blobs/<sha>` →
+staged → **下次冷启激活**（默认 activate=next-launch）；前台每 ≥1 分钟、后台每 900s 检查。
+
+**配置**：`bun .extern/exact/scripts/deploy.mjs keygen airwave`（私钥 `.tools/keys/airwave.pem`，
+EXACT_SIGNING_KEY_DIR 指到那里）；app.json `deploy.store` 四端（web "0" 其余 "A"）+ 
+`channels.prod = https://airwave-76y.pages.dev/updates` + `signing.keys`（公半入库）。
+`scripts/build-native.sh` 带 `EXACT_UPDATE_GENESIS=1 ... --release` 出 genesis 二进制（嵌 seq 0）。
+
+**四条血泪**：
+1. **compat id 的输入含 `typescriptModule`**（app.ts 模块哈希，种子填充与否直接改变它）。
+   deploy 的 capture 必须与 genesis 构建同种子状态，否则流 id 分叉、已装二进制永远 404 自己的流。
+   `scripts/publish-ota.sh` 固化了「填种子 → deploy → 还原」顺序；Android 例外：deploy 从 APK
+   的 production receipt 起流，id 天然对上。
+2. **Cloudflare Pages 单文件 25MiB 上限**：origin 里 30MB+ 的 `releases/*.json`（source-capture
+   记录，客户端不取）会让整个部署静默失败（旧部署继续服务，一切路径都变 SPA 回落 HTML）。
+   publish-web.sh 同步时 `-size +20M -delete` 剥掉它们。
+3. **SwiftPM 会把 XDG 目录搬到 ~/Library 并留逃逸符号链接**，deploy 的 capture 见到
+   「symlink escapes the captured source repositories」就拒绝。根治 = 反转方向：真实内容放
+   `.tools/home/.config/swiftpm/`，`~/Library/org.swift.swiftpm` 与 `~/Library/Caches/org.swift.swiftpm`
+   改为指回仓库的符号链接（原内容 .orig 备份）。
+4. **嵌套 dotfile/dotdir Pages 正常部署**（`.exact-build.json`、`.exact/**` 都能以
+   application/json 服务）；诊断时别只看 200——看 content-type 是不是 text/html（= SPA 回落）。
+
+**验证**（2026-11-18）：origin 三流 ios `397b7ee5` / macos `67b5c970` / android `5b016009`
+全部 head seq 1（android 从 APK receipt 起流）。mac 裸执行 `./Airwave`：
+`exact update: staged seq 1; downloaded 3 files in 2009.0 ms` → 重启 `exact update: current`；
+plan blob（87,079B）内含标记文案「点图钉播放电台（已热更新）」。iOS sim 同样 `current`。
+线上 https://airwave-76y.pages.dev/updates/.exact/prod/<id>/exact.json = application/json。
+**日常发版：改代码 → `bash scripts/publish-ota.sh` → `bash scripts/publish-web.sh` → commit push。**
