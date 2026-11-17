@@ -862,3 +862,28 @@ iOS agent（7,013 浅绿采样）；Android 构建过、真机未连未装。
 - 验证：contract build 零错误；`test web` 13/13；agent web 实测 StationRow 渲染 + 点击播放
   （station-595687e1 → status playing → player-open → panel-name "Christmas FM Non-stop!"）+
   tag 页 feed 正常；三端重建全过。
+
+## 51. SDK 升级到上游最新（b2a7e278，2026-11-17）：Android 获得音频能力
+
+用户指令（m10062）：「更新到最新 sdk 上游」。动机：上游 2026-11-16 的 `a0916e07` 给 Android host
+加了 `host/android/video/` 模块（Media3 ExoPlayer，实现 `video` 与 `audio` 元素，LLP 1042.001），
+APK 在 plan 含 `video`/`audio` 时自动链接——Airwave 的 `audio` 元素自动受益，顺带 media3-exoplayer-hls
+让 Android 也能播 HLS。
+
+- **升级方式**：上游重写历史（QUEUE 工作流），`git pull --ff-only` 报 diverging；正确做法是
+  `git reset --hard origin/main`（SDK checkout 是依赖不是工作仓库，安全）。本地 7 个补丁文件先
+  备份到 /tmp/sdk-patches 再恢复。
+- **补丁重放**：`packages/maps/web/index.js`、`packages/maps/apple/Maps.swift`、
+  `host/apple/svg-filter.mjs` 上游未动，直接拷回；`packages/maps/android/Maps.kt` 上游大改
+  （lifecycle 改走 `viewLifecycle`、相机保存恢复、触摸拦截），把绿点 dot() 四个 hunk
+  （imports/dot()/.icon()/setIcon 循环）重新套到新版上；`canvas/vello/build.rs` 的
+  -fmodules-cache-path 与 `scripts/app.mjs`/`host/apple/build.mjs` 的 --disable-sandbox 按新行号重放。
+- **工具链**：Rust pin 1.97.0 → **1.99.1**（rustup toolchain install + ios/android/wasm targets；
+  .tools/env.sh 的 RUSTUP_TOOLCHAIN 已改）；`cargo fetch --locked` 补新 crate（core-foundation 0.10.1 等）。
+- **Gradle locks**：`:video` 模块进图后构建失败，按提示 `bun exact.mjs android --write-locks` 重写
+  gradle.lockfile/gradle-verification.xml 后通过。
+- **验证**：contract build 零错误；test web 13/13（一次 12/13 是 radio-browser 超时，重跑过）；
+  agent web 播放链路正常（station → status playing）；mac/ios 构建零 error；Android APK 42.26MB，
+  classes.dex 含 1,944 处 media3/exoplayer 引用——**Media3 已链接**。
+- **Android 真机仍未连接**，装 APK 验证声音是唯一遗留；media3 也带 hls，旧「.m3u8 过滤」策略在
+  Android 上已可重新评估（暂未改）。
