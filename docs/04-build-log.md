@@ -887,3 +887,49 @@ APK 在 plan 含 `video`/`audio` 时自动链接——Airwave 的 `audio` 元素
   classes.dex 含 1,944 处 media3/exoplayer 引用——**Media3 已链接**。
 - **Android 真机仍未连接**，装 APK 验证声音是唯一遗留；media3 也带 hls，旧「.m3u8 过滤」策略在
   Android 上已可重新评估（暂未改）。
+
+## 52. Android 真机验声（进行中，未定位）
+
+- SDK b2a7e278 的 Android `audio` 支持确实存在（`host/android/video/` Media3，LLP 1042.001）；
+  APK 的 classes.dex 里有 `Ldev/exact/video/MediaPlayer;`（video 变体已链接，非 novideo）。
+  链路核对：`MainActivity.video = videoPlayers` → `Natives.videoView()` → `MediaPlayer`；
+  `Sources.video()` 对 http/https 一律 `Source.Remote`（不是 grants 问题）。
+- agent android 驱动的是**无头 reader**（设备上无 Activity、无 Media3），测不了声音；
+  每次调用还 force-stop 真机 app。真机只能 adb input tap + dumpsys。
+- 真机证据（MIUI，dark mode）：点按到达窗口（MIUIInput ACTION_DOWN/UP）、电台行命中
+  （agent `tree --ax` 算出坐标 600,1245 = Christmas FM 行）、但 dumpsys audio 无我们的 player、
+  logcat 无 ExoPlayer Init。注意：最后一次抓日志 grep 经过了 head -10，可能截断了滞后到达的
+  ExoPlayer 行——不能下「播放器从未构造」的结论。
+- agent android 驱动前置：staleness 检查比对 seed 内容。流程：
+  `cp .research/geo/globe-seed.full.ts airwave/data/globe-seed.ts` → `bun exact.mjs android` →
+  `touch -t 202611170000 airwave/data/globe-seed.ts`（mtime 早于 APK）→ 才能驱动。
+- **另发现**：Android release 版地图是「No Google Maps key」占位 TextView（boot 日志
+  `exact: map 180: no Maps SDK key`）。需要 `EXACT_GOOGLE_MAPS_API_KEY`（app.json
+  packages["@exact/maps"].android.apiKey 指向的 env）才能出真地图。与声音无关。
+- 下次连机：①点电台→开播放面板看 player-error 红字（failed=src-not-supported→流解析、
+  not-allowed→音频焦点被 MIUI 拒）；②完整未过滤 `logcat --pid`；③试 BBC 等已知可播台。
+
+## 53. Android 无声根因与修复（SDK painted host 补丁 ×2）
+
+- **现象**：四端里 Android 点电台后 app 显示播放中（暂停按钮+LIVE 徽章）但完全无声；
+  `dumpsys audio` 无我们的 player；logcat 零 ExoPlayer 日志。
+- **根因链**（SDK b2a7e278）：
+  1. `contract/lower/src/media.rs`：HTML 语义——`audio` 没绑 `controls` 时 lowering 强制
+     `display="none"`（UA 规则 `audio:not([controls])`，作者写的 display 也会被剥掉），
+     所以任何无控件的 audio 元素都没有布局盒。
+  2. `host/painted/src/paint.rs:905`：display:none 的节点在 paint 遍历时直接 return，
+     永远到不了 NodeType::Video → native() 分发。
+  3. `host/painted/src/paint/native.rs:197`：即使到了分发处，`rect.w/h <= 0` 也会 return。
+  - web host（DOM `<audio>`，display:none 照样出声）与 Apple host（不走 painted 的这两道门）
+    都不受影响——只有 Android/painted 把无声 audio 丢了。SDK 自己的 media 集成测试是
+    headless runner，测不到这条 painted 路径。
+- **修复（.extern/exact 两个补丁，`bun exact.mjs update` / reset --hard 后必须重放）**：
+  1. `host/painted/src/paint.rs`（skip 处）：`boxless_audio`（Video 节点 + SemanticTag=="audio"）
+     豁免 display:none 的 return。
+  2. `host/painted/src/paint/native.rs`（rect 门）：SemanticTag=="audio" 的节点豁免零尺寸 return。
+- **验证**（真机 3de8f372，MIUI）：`ExoPlayerImpl: Init [AndroidXMedia3/1.11.1]`、
+  `AudioTrack set(): packageName com.lizhuo.airwave`、`audioTrackData 35s f:35049 m:0`（35 秒
+  连续渲染零卡顿）、`dumpsys audio` 出现 `piid:7127 type:AudioTrack u/pid:10889/32155`；
+  暂停/恢复（重新 tap）后新 AudioTrack 会话继续出帧。流在漫游 LTE 上约 176kbps 可拉。
+- 教训：无控件 `audio` 在 painted host 上 = display:none = 无盒 = 无播放器；排查顺序应是
+  「logcat 有没有 ExoPlayer Init」而不是先怀疑网络/焦点。
