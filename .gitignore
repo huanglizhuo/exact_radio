@@ -20,3 +20,4 @@ airwave/app.contract.d.ts
 .exact-sdk/
 
 # web/ is the committed Pages build (see scripts/publish-web.sh)
+origin/
