@@ -26,10 +26,14 @@ if [ "${1:-}" != "--no-web" ]; then
   cp -R dist "$ROOT/web"
   # OTA: serve the update origin (deploy --origin "$ROOT/origin" writes it) at
   # /updates — the channel URL in app.json is https://airwave-76y.pages.dev/updates.
-  # The client fetches <channel>/.exact/<channel>/<compat id>/exact.json.
+  # The client fetches <channel>/.exact/<channel>/<compat id>/exact.json plus
+  # .exact/blobs/<sha>. The releases/*.json records (30MB+ source-capture
+  # manifests for future EXACT_UPDATE_RECEIPT builds) stay local only:
+  # Cloudflare Pages caps one file at 25 MiB and the whole deploy fails on them.
   if [ -d "$ROOT/origin/.exact" ]; then
     mkdir -p "$ROOT/web/updates"
     cp -R "$ROOT/origin/.exact" "$ROOT/web/updates/.exact"
+    find "$ROOT/web/updates" -path '*/releases/*.json' -size +20M -delete
     echo "origin/.exact copied to web/updates/ ($(du -sh "$ROOT/web/updates" | cut -f1))"
   fi
   cd "$ROOT"
