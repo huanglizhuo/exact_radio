@@ -1,10 +1,7 @@
-// Airwave — the engine. app.ts answers what it asks for.
-
-use MapCamera, MapMarker from "@exact/maps"
-
-shape Country
-  code: string
-  name: string
+// 漫游电台 Roam Radio — the engine. app.ts answers what it asks for.
+// The view mirrors the interactive prototype (漫游电台 Roam Radio.html):
+// a retro receiver with a tuner dial, one big shuffle button, three tabs
+// (收音机 / 收藏 / 足迹), a region-and-genre sheet, a mini bar and toasts.
 
 shape Station
   id: string
@@ -14,7 +11,9 @@ shape Station
   fallback: string
   favicon: string
   country: string
+  countryEn: string
   countryCode: string
+  flag: string
   tags: string[]
   codec: string
   bitrate: number
@@ -25,33 +24,50 @@ shape Station
   lon: number
   distanceKm: number
 
-shape GlobeData
-  rev: number
-  count: number
-  origin: string
-
 shape DialPick
   rev: number
   station: Station
 
-shape Lang
-  code: string
-  name: string
+shape CountryCount
+  cc: string
+  country: string
+  count: number
+  flag: string
+
+shape FootRow
+  station: Station
+  freq: string
+  place: string
+  agoKind: string
+  agoN: number
+
+shape Footprint
+  countryCount: number
+  stationCount: number
+  countries: CountryCount[]
+  recent: FootRow[]
+
+shape TimeChip
+  part: string
+  time: string
+
+shape Prefs
+  regions: string[]
+  genre: string
 
 shape Reply
   ok: bool
   favorited: bool
 
+shape Time
+  epochAtZero: number
+  utcOffset: number
+  resolvedLocale: string
+
 routes nav
-  tab home "/"
-    tag "/tag/:tag"
-    country "/country/:code"
-    search "/search"
-    nowHome "/now"
-  tab radio "/radio"
-    nowRadio "/radio/now"
+  tab radio "/"
   tab favorites "/favorites"
-    nowFavorites "/favorites/now"
+  tab history "/history"
 
 keyframes pulse
   from opacity=0.45
@@ -60,184 +76,199 @@ keyframes pulse
 fn saved(xs: Station[], id: string): bool =
   xs.filter(x => x.id == id).length > 0
 
-fn detailOf(s: Station): string =
-  (s.country == "" ? s.codec : `${s.country} · ${s.codec}`) + (s.bitrate > 0 ? ` · ${s.bitrate} kbps` : "")
+fn pct(x: number): string =
+  `${(x * 100).toFixed(2)}%`
 
-fn nearKm(z: number): number =
-  z <= 1 ? 3000 : z == 2 ? 1500 : z == 3 ? 800 : z == 4 ? 400 : z == 5 ? 200 : z == 6 ? 100 : 50
+fn posOf(f: number): number =
+  (f - 87.5) / 20.5
+
+fn tickLeft(i: number): string =
+  pct(i / 41)
+
+fn tickH(i: number): string =
+  i % 4 == 0 ? "26px" : i % 2 == 0 ? "17px" : "10px"
+
+fn tickOp(i: number): number =
+  i % 4 == 0 ? 1 : 0.55
+
+fn regionName(k: string): string =
+  k == "asia" ? t("region-asia") : k == "europe" ? t("region-europe") : k == "africa" ? t("region-africa") : k == "americas" ? t("region-americas") : t("region-oceania")
+
+fn genreName(k: string): string =
+  k == "pop" ? t("genre-pop") : k == "jazz" ? t("genre-jazz") : k == "classical" ? t("genre-classical") : k == "rock" ? t("genre-rock") : k == "electronic" ? t("genre-electronic") : k == "news" ? t("genre-news") : k == "folk" ? t("genre-folk") : t("genre-all")
+
+fn agoLabel(kind: string, n: number): string =
+  kind == "now" ? t("ago-now") : kind == "min" ? t("ago-min", n = n.toFixed(0)) : kind == "hour" ? t("ago-hour", n = n.toFixed(0)) : kind == "day" ? t("ago-day", n = n.toFixed(0)) : ""
+
+fn chipOn(on: bool): string =
+  on ? "ink" : "transparent"
+
+fn chipFg(on: bool): string =
+  on ? "paper" : "ink"
 
 component App
-  state draft = ""
-  state applied = ""
-  state codecChoices: string[] = ["MP3", "AAC", "AAC+", "OGG"]
-  state countries: Country[] = [Country(code="US", name="美国"), Country(code="GB", name="英国"), Country(code="DE", name="德国"), Country(code="FR", name="法国"), Country(code="JP", name="日本"), Country(code="CN", name="中国"), Country(code="BR", name="巴西"), Country(code="AU", name="澳大利亚")]
-  state tags: string[] = ["jazz", "classical", "news", "rock", "pop", "electronic", "ambient", "hip hop", "talk", "oldies", "chillout", "world"]
-  state volume = 1
   state wantPlay = false
   state status = "idle"
   state errorCode = ""
-  state want = 40
   state current: option<Station> = none
   state dialRev = 0
   state tuning = false
-  state booted = false
-  state globeLat = 26
-  state globeLon = 12
-  state mapZoom = 2
-  state globeRev = 1
-  state selId = ""
-  state playedPick = ""
-  state pickLat = 0
-  state pickLon = 0
-  state pickZoom = 2
+  state jitterIdx = 0
+  state needleFrom = 0.5
+  state regions: string[] = []
+  state draftRegions: string[] = []
+  state genre = "all"
+  state draftGenre = "all"
+  state sheetOpen = false
+  state toastText = ""
+  state toastOn = false
   state restored = false
   state skips = 0
   state autoLeft = 0
   state triedFallback = false
-  state lang = ""
-  state langName = ""
-  state codec = ""
-  state lastVol = 1
+  state regionKeys: string[] = ["asia", "europe", "africa", "americas", "oceania"]
+  state genreKeys: string[] = ["all", "pop", "jazz", "classical", "rock", "electronic", "news", "folk"]
+  state nowMs = 0
+
+  resource time = exactTime() as shape Time else empty()
+
+  derive epoch = time.epochAtZero + nowMs
+  derive isZh = time.resolvedLocale.startsWith("zh")
+  derive localeName = t("app-name")
+
+  task tick mount
+    every(60000, step)
 
   derive cur = top(nav)
-  derive inNow = cur.name == "nowHome" or cur.name == "nowRadio" or cur.name == "nowFavorites"
-  derive tagValue = cur.name == "tag" ? cur.params.tag : ""
-  derive countryValue = cur.name == "country" ? cur.params.code : ""
   derive currentId = match current { case some(s) => s.id, case none => "" }
   derive hasCurrent = currentId != ""
   derive curName = match current { case some(s) => s.name, case none => "" }
   derive curTagline = match current { case some(s) => s.tagline, case none => "" }
-  derive curFavicon = match current { case some(s) => s.favicon, case none => "" }
-  derive curDetail = match current { case some(s) => detailOf(s), case none => "" }
-  derive playing = status == "playing"
-  derive discoverMore = discoverList.length >= want
-  derive tagMore = tagList.length >= want
-  derive countryMore = countryList.length >= want
-  derive foundMore = found.length >= want
-  derive failedPlayer = status == "failed" and skips == 0
-  derive curLat = match current { case some(s) => s.lat, case none => 0 }
+  derive curFreq = match current { case some(s) => s.frequency, case none => 87.5 }
   derive curLon = match current { case some(s) => s.lon, case none => 0 }
-  derive tagLoading = pending(tagList) and tagList.length == 0
-  derive countryLoading = pending(countryList) and countryList.length == 0
-  derive discoverLoading = pending(discoverList) and discoverList.length == 0
-  derive tagBroken = failed(tagList) and tagList.length == 0
-  derive countryBroken = failed(countryList) and countryList.length == 0
-  derive busy = tuning
+  derive curCodec = match current { case some(s) => s.codec, case none => "" }
+  derive curBitrate = match current { case some(s) => s.bitrate, case none => 0 }
+  derive curTags = match current { case some(s) => s.tags.slice(0, 2), case none => [] }
   derive curStream = match current { case some(s) => (triedFallback and s.fallback != "" ? s.fallback : s.stream), case none => "" }
-  derive errorHint = (errorCode == "network"
-    ? "这台连不上，可能是地区限制或地址失效"
-    : errorCode == "decode"
-    ? "这台用了当前浏览器不支持的编码（多为 HLS）"
-    : errorCode == "src-not-supported"
-    ? "这个地址不是音频流"
-    : errorCode == "not-allowed"
-    ? "被浏览器拦住了，点一下播放键再试"
-    : "这一台暂时播不出来")
-  derive langLabel = lang == "" ? "语言" : langName
-  derive globeRefreshing = pending(globeData)
-  derive globeOriginLabel = (globeData.origin == "seed" ? "内置数据" : globeData.origin == "cache" ? "已缓存" : globeData.origin == "net" ? "已更新" : "")
+  derive playing = status == "playing"
+  derive busy = tuning
+  derive buffering = wantPlay and status == "loading" and not busy
+  derive notPlaying = not playing
+  derive isFav = saved(favs, currentId)
+  derive lampOn = playing and not busy
+  derive lampColor = lampOn ? "brand" : busy or buffering ? "amber" : "lampIdle"
+  derive lampGlow = lampOn ? "0 0 10px #FF5A36" : "none"
+  derive statusLabel = (busy
+    ? t("status-tuning")
+    : not hasCurrent
+    ? t("status-standby")
+    : status == "loading"
+    ? t("status-buffering")
+    : not wantPlay
+    ? t("status-paused")
+    : status == "failed"
+    ? t("status-off-air")
+    : t("status-on-air"))
+  derive needleVal = busy ? sweepVal : posOf(curFreq)
+  derive targetVal = (match first(picked) { case some(p) => p.rev == dialRev ? posOf(p.station.frequency) : needleFrom, case none => needleFrom })
+  derive tp = jitterIdx >= 13 ? 1.0 : jitterIdx / 13.0
+  derive sweepVal = needleFrom + (targetVal - needleFrom) * (1 + 2.70158 * (tp - 1) * (tp - 1) * (tp - 1) + 1.70158 * (tp - 1) * (tp - 1))
+  derive needleLeft = pct(needleVal < 0 ? 0 : needleVal > 1 ? 1 : needleVal)
+  derive freqLabel = (busy ? 87.5 + needleVal * 20.5 : curFreq).toFixed(1)
+  derive titleText = busy ? t("status-tuning") : hasCurrent ? curName : t("status-empty-title")
+  derive subText = busy ? t("sub-tuning") : hasCurrent ? curTagline : t("sub-empty")
+  derive hintText = busy ? t("hint-busy") : hasCurrent ? t("hint-playing") : t("hint-empty")
+  derive shuffleLabel = busy ? t("shuffle-busy") : t("shuffle")
+  derive filterLabel = ((regions.length == 0 ? t("filter-world") : regions.map((r) => regionName(r)).join(t("sep")))
+    + (genre == "all" ? "" : ` · ${genreName(genre)}`))
   derive pickedRev = match first(picked) { case some(p) => p.rev, case none => -1 }
+  derive failedPlayer = status == "failed" and skips == 0
+  derive errorHint = (errorCode == "network"
+    ? t("error-network")
+    : errorCode == "decode"
+    ? t("error-decode")
+    : errorCode == "src-not-supported"
+    ? t("error-src")
+    : errorCode == "not-allowed"
+    ? t("error-blocked")
+    : t("error-other"))
 
-  resource discoverList = feed("discover", "", "", want, "", "") as shape Station[] else empty()
-  resource tagList = feed("tag", tagValue, "", want, "", "") when tagValue != "" as shape Station[] else empty()
-  resource countryList = feed("country", countryValue, "", want, "", "") when countryValue != "" as shape Station[] else empty()
-  resource found = feed("search", "", applied, want, lang, codec) when applied != "" as shape Station[] else empty()
-  resource langs = languages() as shape Lang[] else empty()
-  resource favs = loadFavorites() as shape Station[] else empty()
-  resource recent = loadRecent() as shape Station[] else empty()
-  resource history = searchHistory() as shape string[] else empty()
-  resource globeData = globeLoad(globeRev) as shape GlobeData else empty()
-  resource pins = mapPins(pickLat, pickLon, pickZoom, globeData.count) as shape MapMarker[] else empty()
-  resource pickStation = stationById(selId, globeLat, globeLon) when selId != "" as shape Station else empty()
-  resource picked = randomStation(dialRev, currentId, pickLat, pickLon, nearKm(pickZoom)) when dialRev > 0 as shape DialPick[] else empty()
+  resource favs = loadFavorites(isZh) as shape Station[] else empty()
+  resource recent = loadRecent(isZh) as shape Station[] else empty()
+  resource prefs = loadPrefs() as shape Prefs else empty()
+  resource foot = footprint(isZh) with epoch as shape Footprint else empty()
+  resource timeChip = localTime(curLon) with epoch when curLon != 0 as shape TimeChip else empty()
+  resource picked = shuffleStation(dialRev, regions, genre, currentId, isZh) when dialRev > 0 as shape DialPick[] else empty()
 
   mutation savedList as shape Reply refreshes favs
-  mutation logged as shape Reply refreshes recent
-  mutation recorded as shape Reply refreshes history
+  mutation logged as shape Reply refreshes recent, foot
+  mutation savedPrefs as shape Reply refreshes prefs
 
-  task liveSearch when draft.trim() != applied
-    after(450, commitDraft)
-  task skipOn when status == "failed" and skips > 0
-    after(900, autoSkip)
-  task boot when not booted
-    after(1, bootRadio)
-  task restore when not restored and recent.length > 0
-    after(1, restoreLast)
+  task jitter when tuning
+    after(100, jitterTick)
   task landing when tuning and pickedRev == dialRev
-    after(650, lockIn)
+    after(1400, lockIn)
   task gaveUp when tuning and dialRev > 0 and picked.length == 0 and not pending(picked)
     after(4000, stopTuning)
-  task refreshOnce when booted and globeRev == 1
-    after(600, bumpGlobe)
-  task pickPlay when selId != "" and selId != playedPick and not pending(pickStation) and pickStation.id != ""
-    after(30, playPick)
-
-  action follow(target: string)
-    nav = go(nav, target)
-
-  action type(value: string)
-    draft = value
-
-  action commitDraft
-    commit(draft)
-
-  action commit(value: string)
-    let next = value.trim()
-    draft = next
-    applied = next
-    want = 40
-    if next != ""
-      send recorded = pushSearch(next)
-
-  action useSearch(q: string)
-    draft = q
-    applied = q
-    want = 40
-    nav = go(nav, "/search")
-    send recorded = pushSearch(q)
+  task toastBye when toastOn
+    after(2600, clearToast)
+  task restore when not restored and recent.length > 0
+    after(1, restoreLast)
+  task skipOn when status == "failed" and skips > 0
+    after(900, autoSkip)
+  task adoptPrefs when prefs.regions.length > 0 or prefs.genre != ""
+    after(1, applyPrefs)
 
   action noop
-    draft = draft
+
+  action step
+    nowMs = performanceNow()
 
   action selectTab(name: string)
     nav = select(nav, name)
 
-  action goSearch
-    nav = go(nav, "/search")
+  action follow(target: string)
+    nav = go(nav, target)
 
-  action goTag(tag: string)
-    want = 40
-    nav = go(nav, path("tag", tag))
+  action showToast(msg: string)
+    toastText = msg
+    toastOn = true
 
-  action goCountry(code: string)
-    want = 40
-    nav = go(nav, path("country", code))
+  action clearToast
+    toastOn = false
+    toastText = ""
 
-  action retryDiscover
-    refresh discoverList
+  action applyPrefs
+    if prefs.regions.length > 0
+      regions = prefs.regions
+      draftRegions = prefs.regions
+    if prefs.genre != ""
+      genre = prefs.genre
+      draftGenre = prefs.genre
 
-  action retryBrowse
-    refresh tagList
-    refresh countryList
+  action tune
+    if not busy
+      tuning = true
+      jitterIdx = 0
+      needleFrom = posOf(curFreq)
+      dialRev = dialRev + 1
 
-  action loadMore
-    if want < 400
-      want = want + 40
+  action jitterTick
+    jitterIdx = jitterIdx + 1
 
-  action setLang(code: string, name: string)
-    lang = code
-    langName = name
-    want = 40
+  action lockIn
+    match first(picked)
+      case some(p)
+        if p.rev == dialRev
+          tuning = false
+          play(p.station)
+      case none
+        tuning = false
 
-  action setCodec(name: string)
-    codec = name
-    want = 40
-
-  action clearFilters
-    lang = ""
-    langName = ""
-    codec = ""
-    want = 40
+  action stopTuning
+    if tuning
+      tuning = false
+      showToast(t("toast-network"))
 
   action start(s: Station)
     current = some(s)
@@ -245,7 +276,7 @@ component App
     status = "loading"
     errorCode = ""
     triedFallback = false
-    send logged = pushRecent(s)
+    send logged = pushRecent(s, epoch)
 
   action play(s: Station)
     start(s)
@@ -256,6 +287,8 @@ component App
     if not busy
       if status == "failed"
         retry()
+      else if not hasCurrent
+        tune()
       else
         wantPlay = not wantPlay
 
@@ -281,7 +314,7 @@ component App
     if status == "failed"
       skips = 0
       autoLeft = autoLeft - 1
-      advance()
+      tune()
 
   action retry
     errorCode = ""
@@ -289,541 +322,299 @@ component App
     wantPlay = true
     triedFallback = false
 
-  action expand
-    nav = go(nav, nav.tab == "favorites" ? "/favorites/now" : nav.tab == "radio" ? "/radio/now" : "/now")
-
-  action collapse
-    nav = back(nav)
-
-  action stopPlayback
-    wantPlay = false
-    status = "idle"
-    nav = back(nav)
-
-  action saveCurrent
-    match current
-      case some(s)
-        send savedList = toggleFavorite(s)
-      case none
-
-  action tune
-    if not busy
-      tuning = true
-      dialRev = dialRev + 1
-
-  action lockIn
-    match first(picked)
-      case some(p)
-        if p.rev == dialRev
-          tuning = false
-          play(p.station)
-          if p.station.lat != 0 or p.station.lon != 0
-            flyTo(p.station.lat, p.station.lon)
-      case none
-        tuning = false
-
-  action stopTuning
-    tuning = false
-
-  action advance
-    let pool = (cur.name == "tag" ? tagList : cur.name == "country" ? countryList : cur.name == "search" ? found : cur.name == "favorites" ? favs : discoverList)
-    let rest = pool.filter(x => x.id != currentId)
-    if nav.tab == "radio" or rest.length == 0
-      tune()
+  action toggleFav
+    if not hasCurrent
+      showToast(t("toast-fav-need"))
     else
-      match first(rest)
+      match current
         case some(s)
-          start(s)
+          let had = saved(favs, s.id)
+          send savedList = toggleFavorite(s)
+          if had
+            showToast(t("toast-unfav"))
+          else
+            showToast(t("toast-fav"))
         case none
-          tune()
 
-  action nextStation
-    triedFallback = false
-    skips = 0
-    autoLeft = 2
-    advance()
+  action removeFav(s: Station)
+    send savedList = toggleFavorite(s)
+    showToast(t("toast-unfav"))
 
-  action setVolume(v: number)
-    volume = v
+  action openSheet
+    draftRegions = regions
+    draftGenre = genre
+    sheetOpen = true
 
-  action toggleMute
-    if volume > 0
-      lastVol = volume
-      volume = 0
-    else
-      volume = (lastVol > 0 ? lastVol : 0.8)
+  action closeSheet
+    sheetOpen = false
+    // Dismissing the sheet (scrim tap) keeps the choices you made — the
+    // chips must not snap back to the previous filter state. Say so: the
+    // commit is silent otherwise, and the next shuffle changes underfoot.
+    let changed = (regions.join(",") != draftRegions.join(",")) or (genre != draftGenre)
+    regions = draftRegions
+    genre = draftGenre
+    send savedPrefs = savePrefs(draftRegions, draftGenre)
+    if changed
+      showToast(t("toast-sheet-applied"))
 
-  action bootRadio
-    if cur.name == "home"
-      nav = select(nav, "radio")
-    booted = true
+  action flipAllRegions
+    draftRegions = []
+
+  action flipRegion(k: string)
+    draftRegions = draftRegions.includes(k) ? draftRegions.filter(x => x != k) : draftRegions.concat([k])
+
+  action setGenre(k: string)
+    draftGenre = k
+
+  action applySheet
+    sheetOpen = false
+    let nextRegions = draftRegions
+    let nextGenre = draftGenre
+    regions = nextRegions
+    genre = nextGenre
+    send savedPrefs = savePrefs(nextRegions, nextGenre)
+    tune()
 
   action restoreLast
     restored = true
-    if not hasCurrent and recent.length > 0
+    if not hasCurrent
       match first(recent)
         case some(s)
           current = some(s)
           wantPlay = false
           status = "idle"
-          globeLat = s.lat
-          globeLon = s.lon
-          pickLat = s.lat
-          pickLon = s.lon
         case none
 
-  action mapMoved(c: MapCamera)
-    globeLat = c.latitude
-    globeLon = c.longitude
-    mapZoom = c.zoom
-    pickLat = c.latitude
-    pickLon = c.longitude
-    pickZoom = c.zoom
-
-  action mapPicked(id: string)
-    selId = id
-
-  action playPick
-    play(pickStation)
-    playedPick = selId
-
-  action flyTo(lat: number, lon: number)
-    globeLat = lat
-    globeLon = lon
-    pickLat = lat
-    pickLon = lon
-
-  action bumpGlobe
-    globeRev = globeRev + 1
-
-
-  action onKey(k: string)
-    if k == "Escape" and inNow
-      nav = back(nav)
-
   view
-    main testId="app" viewport-fit="cover" width="100%" height="100%" background-color="-exact-background"
-      navigationKey=`${cur.id}` navigate=follow keycapture=onKey key=onKey
+    main testId="app" viewport-fit="cover" width="100%" height="100%" max-width="560px" margin="0 auto"
+      display="flex" flex-direction="column"
+      navigationKey=`${cur.id}` navigate=follow
 
       if hasCurrent
         match current
           case some(s)
-            audio src=curStream paused=(not wantPlay) volume=volume
-              metadata=MediaMetadata(title=s.name, artist=s.tagline, album="Airwave", artwork=s.favicon)
+            audio src=curStream paused=(not wantPlay)
+              metadata=MediaMetadata(title=s.name, artist=s.tagline, album=localeName, artwork=s.favicon)
               play=started playing=started pause=pausedNow ended=pausedNow
               error=failed
-              nexttrack=nextStation
           case none
             view width=0 height=0
 
-      for t in nav.tabs key=t.name
-        view role="tabpanel" id=`panel-${t.name}` flex=1 min-height=0
-          display=(nav.tab == t.name ? "flex" : "none")
-          for e in t.stack key=e.id
-            column navigationKey=`${e.id}` navigationScroll=`content-${e.id}` position="absolute" inset=0
-              display="flex" flex-direction="column" width="100%"
-              max-width=(e.name == "radio" ? "none" : "47.5rem") margin-left="auto" margin-right="auto"
-              navigationPresentation=(e.name == "nowHome" or e.name == "nowRadio" or e.name == "nowFavorites" ? "modal" : "")
-              navigationDetent=(e.name == "nowHome" or e.name == "nowRadio" or e.name == "nowFavorites" ? "large" : "")
-              padding-bottom=(e.name == "radio" ? "0px" : hasCurrent and not inNow ? "calc(150px)" : "calc(86px)")
+      view flex=1 min-height=0 position="relative" display="flex" testId="panels"
+        for t in nav.tabs key=t.name
+          view role="tabpanel" id=`panel-${t.name}` flex=1 min-height=0
+            display=(nav.tab == t.name ? "flex" : "none")
+            for e in t.stack key=e.id
+              column navigationKey=`${e.id}` navigationScroll=`content-${e.id}` position="absolute" inset=0
+                display="flex" flex-direction="column" width="100%"
 
-              if e.name == "home"
-                if discoverList.length == 0 and failed(discoverList)
-                  column flex=1 align-items="center" justify-content="center" gap=12 padding=24
-                    image "symbol:alert" width=40 height=40 color="-exact-tertiary-label"
-                    text "连不上电台索引" font="-exact-headline"
-                    text "检查网络后重试。" font="-exact-footnote" color="-exact-secondary-label"
-                    button press=retryDiscover testId="retry-discover" "重试"
-                else
-                  scroll flex=1 min-height=0 -exact-scroll-edge-effect="soft"
-                    column gap=20 padding-bottom=24
-                      row align-items="flex-end" gap=12 padding="8px 16px 0"
-                        column flex=1 gap=2
-                          text "发现" font="-exact-large-title" font-weight=700 testId="title-home"
-                          text "五万个电台，随便挑一个" font="-exact-footnote" color="-exact-secondary-label"
-                        button press=goSearch aria-label="搜索电台" testId="open-search" appearance="none" padding=0
-                          column width=44 height=44 border-radius=22 align-items="center" justify-content="center"
-                            background-color="-exact-secondary-background"
-                            image "symbol:search" width=19 height=19 color="AccentColor"
+              if e.name == "radio"
+                scroll flex=1 min-height=0
+                  column gap=18 padding=`calc(6px + var(--exact-safe-area-inset-top)) 20px 28px`
+                    row align-items="center" justify-content="space-between"
+                      row align-items="center" gap=8
+                        view width=12 height=12 border-radius=6 background-color="brand"
+                        text localeName font-size="min(-exact-title3, 21px)" font-weight=700 testId="locale-title"
+                      button -exact-press-scale=0.96 press=openSheet testId="open-filter" appearance="none" padding=0
+                        row align-items="center" gap=6 height=36 padding="0 14px" border-radius=18
+                          border="1.5px solid ink" background-color="transparent"
+                          text filterLabel font-size="min(-exact-footnote, 13px)" font-weight=500 color="ink" testId="filter-label"
+                          text "▼" font-size="min(-exact-caption2, 10px)"
 
-                      if recent.length > 0
-                        column gap=6
-                          row padding="0 16px 4px"
-                            text "继续收听" font="-exact-title3" font-weight=600
-                          list display="flex" virtualized=true height=158 estimated-item-width=128 gap=12 padding="0 16px"
-                            for s in recent key=s.id
-                              button press=play(s) testId=`recent-${s.id}` appearance="none" padding=0
-                                column width=116 gap=6 align-items="flex-start"
-                                  view width=116 height=116 border-radius=14 position="relative" overflow="hidden"
-                                    box-shadow="0 6px 16px rgba(10, 20, 35, 0.16)"
-                                    background-color="-exact-secondary-background"
-                                    image "symbol:radio" width=34 height=34 position="absolute" left=41 top=41
-                                      color="-exact-secondary-label"
-                                    if s.favicon != ""
-                                      image s.favicon position="absolute" left=0 top=0 width=116 height=116
-                                  text s.name font="-exact-caption1" line-clamp=2 line-height=1.25
+                    column gap=16 padding=16 border-radius=28 background-color="card"
+                      box-shadow="inset 0 1px 0 rgba(255,255,255,.08),0 12px 26px rgba(58,41,30,.25)"
+                      testId="radio-face"
+                      column height=94 border-radius=14 background-color="dialFace" position="relative"
+                        box-shadow="inset 0 2px 10px rgba(58,41,30,.4)" overflow="hidden"
+                        for i in range(42) key=i
+                          view position="absolute" bottom=16 left=tickLeft(i) width=1.5 height=tickH(i)
+                            background-color="tickInk" opacity=tickOp(i)
+                        row position="absolute" bottom=8 left=0 right=0 justify-content="space-between" padding="0 0"
+                          text "MHz" font-size="min(-exact-caption2, 11px)" color="dialEdge" padding="0 2px" testId="dial-mhz"
+                          text "FM" font-size="min(-exact-caption2, 11px)" color="dialEdge" padding="0 2px" testId="dial-fm"
+                        row gap=8 position="absolute" top=10 left=0 right=0 justify-content="space-between" padding="0 4px"
+                          for f in [88, 92, 96, 100, 104, 108] key=f
+                            text f.toFixed(0) font-size="min(-exact-caption2, 11px)" font-weight=500 color="tickInk" testId=`dial-${f}`
+                        view position="absolute" top=4 bottom=4 left=needleLeft width=3 margin-left=-1.5 border-radius=2
+                          background-color="brand" box-shadow="0 0 8px rgba(255,90,54,.6)" testId="needle"
 
-                      column gap=6
-                        row padding="0 16px 4px" align-items="center" gap=8
-                          text "正在流行" font="-exact-title3" font-weight=600 flex=1
-                        if discoverLoading
-                          for i in [0, 1, 2, 3] key=i
-                            row gap=12 align-items="center" padding="7px 16px"
-                              view width=52 height=52 border-radius=10 background-color="-exact-tertiary-background"
-                                animation="pulse 1.2s ease-in-out infinite"
-                              column flex=1 gap=6
-                                view height=12 width="55%" border-radius=6 background-color="-exact-tertiary-background"
-                                  animation="pulse 1.2s ease-in-out infinite"
-                                view height=10 width="35%" border-radius=5 background-color="-exact-tertiary-background"
-                                  animation="pulse 1.2s ease-in-out infinite"
-                        else
-                          for s in discoverList.slice(0, 5) key=s.id
-                            row press=play(s) testId=`station-${s.id}` gap=12 align-items="center" padding="7px 16px"
-                              view width=52 height=52 border-radius=10 position="relative" overflow="hidden"
-                                background-color="-exact-secondary-background"
-                                image "symbol:radio" width=20 height=20 position="absolute" left=16 top=16
-                                  color="-exact-secondary-label"
-                                if s.favicon != ""
-                                  image s.favicon position="absolute" left=0 top=0 width=52 height=52
-                              column flex=1 min-width=0 gap=1
-                                text s.name font="-exact-subheadline" line-clamp=1
-                                text s.tagline font="-exact-caption2" color="-exact-secondary-label" line-clamp=1
+                      column gap=6 padding="0 4px"
+                        row align-items="center" justify-content="space-between" font-size="0.75rem" color="creamMut"
+                          row align-items="center" gap=8
+                            view width=8 height=8 border-radius=4 background-color=lampColor
+                              box-shadow=lampGlow testId="lamp" animation=(busy or buffering ? "pulse 1s ease-in-out infinite" : "none")
+                            text statusLabel font-size="min(-exact-caption1, 12px)" testId="status-label"
+                          text `FM ${freqLabel}` font-size="min(-exact-caption1, 12px)" testId="freq-label"
+                        text titleText font-size="min(-exact-title1, 26px)" font-weight=600 line-height=1.15 color="creamText"
+                          line-clamp=2 min-height=60 testId="now-title"
+                        text subText font-size="min(-exact-subheadline, 14px)" color="creamMut" line-clamp=1 testId="now-sub"
 
-                      column gap=6
-                        row padding="0 16px 4px"
-                          text "按类型" font="-exact-title3" font-weight=600
-                        row flex-wrap="wrap" gap=8 padding="0 16px"
-                          for tag in tags key=tag
-                            button press=goTag(tag) testId=`tag-${tag}` appearance="none" padding=0
-                              row padding="7px 13px" border-radius=16 background-color="-exact-secondary-background"
-                                text tag font="-exact-subheadline"
+                      row align-items="center" gap=14
+                        view flex=1 height=68 border-radius=12 background-color="knobRing" display="flex" flex-direction="column" align-items="stretch" justify-content="center" gap=9 padding="0 14px"
+                          for g in range(5) key=g
+                            view height=3 border-radius=2 background-color="grille"
 
-                      column gap=6
-                        row padding="0 16px 4px"
-                          text "按国家" font="-exact-title3" font-weight=600
-                        row flex-wrap="wrap" gap=8 padding="0 16px"
-                          for c in countries key=c.code
-                            button press=goCountry(c.code) testId=`country-${c.code}` appearance="none" padding=0
-                              row padding="7px 13px" border-radius=16 background-color="-exact-secondary-background"
-                                text c.name font="-exact-subheadline"
-              else if e.name == "tag" or e.name == "country"
-                header display="flex" align-items="center" gap=8 padding="8px 16px"
-                  text (e.name == "tag" ? `#${e.params.tag}` : e.params.code) role="heading" aria-level=1 testId="title-browse"
-                if (e.name == "tag" ? tagList : countryList).length == 0
-                  if e.name == "tag" ? tagLoading : countryLoading
-                    column flex=1 align-items="center" justify-content="center" gap=12
-                      image "symbol:radio" width=30 height=30 color="-exact-secondary-label" animation="pulse 1.2s ease-in-out infinite"
-                      text "正在载入电台…" font="-exact-subheadline" color="-exact-secondary-label"
-                  else if e.name == "tag" ? tagBroken : countryBroken
-                    column flex=1 align-items="center" justify-content="center" gap=12 padding=24
-                      image "symbol:alert" width=40 height=40 color="-exact-tertiary-label"
-                      text "连不上电台索引" font="-exact-headline"
-                      button press=retryBrowse testId="retry-browse" "重试"
-                  else
-                    column flex=1 align-items="center" justify-content="center" gap=10 padding=24
-                      image "symbol:radio" width=40 height=40 color="-exact-tertiary-label"
-                      text "这里还没有登记的电台" font="-exact-headline"
-                      text "换个类型或国家看看。" font="-exact-footnote" color="-exact-secondary-label"
-                else
-                  list testId=`feed-${e.name}` appearance="none" virtualized=true flex=1 min-height=0
-                    estimated-item-height=64 reachend=loadMore reach-margin="60%"
-                    for s in (e.name == "tag" ? tagList : countryList) key=s.id
-                      StationRow(s=s, onTap=play(s), active=(s.id == currentId))
+                    row align-items="center" justify-content="space-between" padding="4px 14px 0"
+                      button -exact-press-scale=0.96 press=toggleFav testId="fav-button" appearance="none" padding=0 background-color="transparent" aria-label=t("fav-aria") aria-pressed=isFav disabled=busy opacity=(busy ? 0.45 : 1)
+                        view width=56 height=56 border-radius=28 display="flex" align-items="center" justify-content="center"
+                          border="1.5px solid ink" background-color="transparent"
+                          text (isFav ? "♥" : "♡") font-size="min(-exact-title2, 24px)" line-height=1.2 color=(isFav ? "brandDeep" : "ink")
+                      button -exact-press-scale=0.96 press=tune testId="shuffle" appearance="none" padding=0 background-color="transparent" aria-label=t("shuffle-aria")
+                        column width=118 height=118 border-radius=59 align-items="center" justify-content="center"
+                          background-color="brand" box-shadow="0 7px 0 #C2401F,0 16px 26px rgba(58,41,30,.22)"
+                          text shuffleLabel font-size="min(-exact-title3, 20px)" font-weight=700 color="brandInk"
+                      button -exact-press-scale=0.96 press=togglePlay testId="play-toggle" appearance="none" padding=0 background-color="transparent" aria-label=t("play-pause-aria") disabled=busy opacity=(busy ? 0.45 : 1)
+                        view width=56 height=56 border-radius=28 display="flex" align-items="center" justify-content="center"
+                          background-color=(busy ? "card" : "toastDark")
+                          if busy or buffering
+                            image "symbol:circle" width=20 height=20 color="amber"
+                              animation="pulse 1s ease-in-out infinite"
+                          else if wantPlay
+                            row gap=5
+                              view width=5 height=18 border-radius=1.5 background-color="iconCream"
+                              view width=5 height=18 border-radius=1.5 background-color="iconCream"
+                          else
+                            view width=17 height=20 margin-left=4 background-color="iconCream"
+                              clip-path="polygon(0 0,100% 50%,0 100%)"
 
-              else if e.name == "search"
-                column gap=10 padding="8px 16px 10px"
-                  header display="flex" align-items="center" gap=10
-                    text "搜索" role="heading" aria-level=1 testId="title-search"
-                    input testId="search-field" flex=1 value=draft input=type placeholder="电台名或类型"
-                      padding="9px 12px" border-radius=12 background-color="-exact-secondary-background"
-                  row gap=8
-                    button press=noop testId="lang-filter" popovertarget="lang-menu" appearance="none" padding=0
-                      row padding="6px 12px" border-radius=14 align-items="center" gap=4
-                        background-color=(lang == "" ? "-exact-secondary-background" : "AccentColor")
-                        text langLabel font="-exact-caption1" color=(lang == "" ? "-exact-label" : "#FFFFFF")
-                        svg width=10 height=10 viewBox="0 0 24 24"
-                          path d="M6 9l6 6 6-6" fill="none" stroke=(lang == "" ? "-exact-secondary-label" : "#FFFFFF") stroke-width=2.6 stroke-linecap="round" stroke-linejoin="round"
-                    button press=noop testId="codec-filter" popovertarget="codec-menu" appearance="none" padding=0
-                      row padding="6px 12px" border-radius=14 align-items="center" gap=4
-                        background-color=(codec == "" ? "-exact-secondary-background" : "AccentColor")
-                        text (codec == "" ? "编码" : codec) font="-exact-caption1" color=(codec == "" ? "-exact-label" : "#FFFFFF")
-                        svg width=10 height=10 viewBox="0 0 24 24"
-                          path d="M6 9l6 6 6-6" fill="none" stroke=(codec == "" ? "-exact-secondary-label" : "#FFFFFF") stroke-width=2.6 stroke-linecap="round" stroke-linejoin="round"
-                    if lang != "" or codec != ""
-                      button press=clearFilters testId="clear-filters" appearance="none" padding="6px 4px"
-                        text "清除" font="-exact-caption1" color="AccentColor"
-                  column id="lang-menu" popover="auto" role="menu" gap=2 padding=6
-                    background-color="-exact-background" border-radius=14 box-shadow="0 12px 30px rgba(8,16,30,0.18)"
-                    button role="menuitemradio" aria-checked=(lang == "") press=setLang("", "") testId="lang-all" appearance="none" padding="8px 10px"
-                      row gap=8 align-items="center" width="100%"
-                        text "全部语言" font="-exact-subheadline"
-                        if lang == ""
-                          image "symbol:checkmark" width=14 height=14 color="AccentColor"
-                    for l in langs key=l.code
-                      button role="menuitemradio" aria-checked=(lang == l.code) press=setLang(l.code, l.name) testId=`lang-${l.code}` appearance="none" padding="8px 10px"
-                        row gap=8 align-items="center" width="100%"
-                          text l.name font="-exact-subheadline"
-                          if lang == l.code
-                            image "symbol:checkmark" width=14 height=14 color="AccentColor"
-                  column id="codec-menu" popover="auto" role="menu" gap=2 padding=6
-                    background-color="-exact-background" border-radius=14 box-shadow="0 12px 30px rgba(8,16,30,0.18)"
-                    button role="menuitemradio" aria-checked=(codec == "") press=setCodec("") testId="codec-all" appearance="none" padding="8px 10px"
-                      row gap=8 align-items="center" width="100%"
-                        text "全部编码" font="-exact-subheadline"
-                        if codec == ""
-                          image "symbol:checkmark" width=14 height=14 color="AccentColor"
-                    for c in codecChoices key=c
-                      button role="menuitemradio" aria-checked=(codec == c) press=setCodec(c) testId=`codec-${c}` appearance="none" padding="8px 10px"
-                        row gap=8 align-items="center" width="100%"
-                          text c font="-exact-subheadline"
-                          if codec == c
-                            image "symbol:checkmark" width=14 height=14 color="AccentColor"
-                if applied == ""
-                  column flex=1 min-height=0 gap=14 padding="4px 16px"
-                    if history.length > 0
-                      column gap=8
-                        text "最近搜索" font="-exact-footnote" color="-exact-secondary-label"
-                        row flex-wrap="wrap" gap=8
-                          for q in history key=q
-                            button press=useSearch(q) testId=`history-${q}` appearance="none" padding=0
-                              row padding="6px 12px" border-radius=15 background-color="-exact-secondary-background"
-                                text q font="-exact-footnote"
-                    column gap=8
-                      text "试试这些" font="-exact-footnote" color="-exact-secondary-label"
-                      row flex-wrap="wrap" gap=8
-                        for t in tags key=t
-                          button press=goTag(t) testId=`suggest-${t}` appearance="none" padding=0
-                            row padding="6px 12px" border-radius=15 background-color="-exact-secondary-background"
-                              text t font="-exact-footnote"
-                else if found.length == 0
-                  if pending(found)
-                    column flex=1 align-items="center" justify-content="center" gap=12
-                      image "symbol:radio" width=30 height=30 color="-exact-secondary-label" animation="pulse 1.2s ease-in-out infinite"
-                      text "正在搜索…" font="-exact-subheadline" color="-exact-secondary-label"
-                  else
-                    column flex=1 align-items="center" justify-content="center" padding=24 gap=14
-                      image "symbol:search" width=44 height=44 color="-exact-tertiary-label"
-                      text `没有找到「${applied}」` font="-exact-headline" text-align="center" line-clamp=2 testId="search-empty-title"
-                      text "换个关键词，或者去发现的分类里翻翻。" font="-exact-footnote" color="-exact-secondary-label" text-align="center"
-                      if lang != "" or codec != ""
-                        button press=clearFilters testId="empty-clear-filters" appearance="none" padding=0
-                          row padding="8px 16px" border-radius=16 background-color="-exact-secondary-background"
-                            text (codec == "" ? `去掉「${langName}」筛选` : `去掉编码 ${codec} 筛选`)
-                              font="-exact-subheadline" color="AccentColor"
-                else
-                  list testId="feed-search" appearance="none" virtualized=true flex=1 min-height=0
-                    estimated-item-height=64 reachend=loadMore reach-margin="60%"
-                    for s in found key=s.id
-                      StationRow(s=s, onTap=play(s), active=(s.id == currentId))
+                    text hintText font-size="0.8125rem" color="muted" text-align="center" margin-top=2 testId="hint"
+
+                    if hasCurrent and not busy
+                      row flex-wrap="wrap" justify-content="center" gap=8 testId="chips"
+                        for tg in curTags key=tg
+                          view min-height=30 padding="0 12px" border-radius=15 display="flex" align-items="center" justify-content="center" background-color="chipBg"
+                            text `#${tg}` font-size="min(-exact-caption1, 12.5px)" color="chipText"
+                        if curLon != 0
+                          view min-height=30 padding="0 12px" border-radius=15 display="flex" align-items="center" justify-content="center" background-color="chipBg"
+                            text t("local-time", part = (timeChip.part == "dawn" ? t("part-dawn") : timeChip.part == "morning" ? t("part-morning") : timeChip.part == "noon" ? t("part-noon") : timeChip.part == "afternoon" ? t("part-afternoon") : t("part-evening")), time = timeChip.time) font-size="min(-exact-caption1, 12.5px)" color="chipText"
+
+                    if failedPlayer
+                      row align-items="center" gap=8 padding="0 8px" testId="player-error"
+                        image "symbol:alert" width="1rem" height="1rem" color="brandDeep"
+                        text errorHint font-size="0.8125rem" color="brandDeep" flex=1
+                        button -exact-press-scale=0.96 press=retry testId="player-retry" t("retry")
+                        button -exact-press-scale=0.96 press=tune testId="player-next" t("next")
 
               else if e.name == "favorites"
-                header display="flex" align-items="center" gap=8 padding="8px 16px"
-                  text "收藏" role="heading" aria-level=1 testId="title-favorites"
-                  text `${favs.length} 个电台` font="-exact-footnote" color="-exact-secondary-label" flex=1
-                if favs.length == 0
-                  column flex=1 align-items="center" justify-content="center" gap=12 padding=24
-                    image "symbol:star" width=44 height=44 color="-exact-tertiary-label"
-                    text "还没有收藏" font="-exact-headline"
-                    text "在播放面板里点星星，电台就会留在这里。" font="-exact-footnote" color="-exact-secondary-label" text-align="center"
-                    button press=selectTab("home") testId="empty-go-home" "去发现"
-                else
-                  list testId="feed-favorites" flex=1 min-height=0
-                    for s in favs key=s.id
-                      StationRow(s=s, onTap=play(s), active=(s.id == currentId))
+                scroll flex=1 min-height=0
+                  column gap=16 padding=`calc(6px + var(--exact-safe-area-inset-top)) 20px 24px`
+                    row align-items="flex-end" justify-content="space-between"
+                      text t("tab-favorites") font-size="1.875rem" font-weight=700 testId="title-favorites"
+                      text t("favs-count", n = favs.length.toFixed(0)) font-size="0.75rem" color="muted"
+                    if favs.length == 0
+                      column margin-top=40 padding="28px 24px" border-radius=22 align-items="center" gap=10
+                        border="1.5px dashed dash" testId="favs-empty"
+                        text "♡" font-size="2.125rem" color="brandDeep"
+                        text t("favs-empty-title") font-size="1.0625rem" font-weight=600
+                        text t("favs-empty-body")
+                          font-size="0.875rem" color="muted" text-align="center" line-height=1.5
+                        button -exact-press-scale=0.96 press=selectTab("radio") testId="empty-go-radio" appearance="none" padding=0
+                          view min-height=44 padding="0 22px" border-radius=22 display="flex" align-items="center" justify-content="center"
+                            background-color="ink"
+                            text t("favs-go") font-size="0.875rem" font-weight=600 color="paper"
+                    else
+                      column gap=10 testId="feed-favorites"
+                        for s in favs key=s.id
+                          row -exact-press-scale=0.96 press=play(s) testId=`station-${s.id}` gap=14 align-items="center"
+                            padding="12px 14px 12px 12px" border-radius=18 background-color="panel"
+                            box-shadow="0 1px 0 rgba(58,41,30,.06)"
+                            view min-width=56 min-height=56 flex=0 border-radius=16 display="flex" align-items="center" justify-content="center" background-color="card"
+                              column gap=2 align-items="center" padding="4px 6px"
+                                text s.flag font-size="1.375rem" line-height=1.25
+                                text s.frequency.toFixed(1) font-size="min(-exact-footnote, 13px)" font-weight=500 color="amber"
+                            column flex=1 min-width=0 gap=3
+                              text s.name font-size="1rem" font-weight=600 line-clamp=1
+                              text s.tagline font-size="0.8125rem" color="muted" line-clamp=1
+                            if s.id == currentId
+                              text t("status-on-air") font-size="min(-exact-caption2, 10px)" color="brandDeep"
+                            button -exact-press-scale=0.96 press=removeFav(s) testId=`unfav-${s.id}` appearance="none" padding=0 aria-label=t("unfav-aria", n=s.name)
+                              view width="2.75rem" height="2.75rem" flex=0 border-radius="1.375rem" display="flex" align-items="center" justify-content="center"
+                                background-color="transparent"
+                                text "♥" font-size="1.25rem" color="brandDeep"
 
-              else if e.name == "radio"
-                column flex=1 min-height=0 position="relative" testId="radio-face"
-                  margin-top="calc(-1 * var(--exact-safe-area-inset-top))"
-                  exact-map testId="map" width="100%" flex=1 min-height=0
-                    latitude=globeLat longitude=globeLon zoomLevel=mapZoom markers=pins selected=currentId
-                    change=mapPicked moveend=mapMoved
-                    aria-label="世界电台地图；点图钉播放电台"
-                  row position="absolute" left=14 top="calc(14px + var(--exact-safe-area-inset-top))" gap=6 align-items="center"
-                    row align-items="center" gap=8 height=36 padding="0 12px" border-radius=18
-                      background-color="rgba(255, 255, 255, 0.86)" backdrop-filter="blur(18px)"
-                      border="1px solid rgba(15, 23, 42, 0.10)" testId="globe-status"
-                      if globeRefreshing
-                        text "更新中" font="-exact-caption2" color="#2563EB" testId="globe-origin"
-                      else
-                        text `${globeData.count} 台` font="-exact-caption1" font-weight=600 color="#0F172A"
-                        if globeOriginLabel != ""
-                          text globeOriginLabel font="-exact-caption2" color="#64748B" testId="globe-origin"
-                    button press=bumpGlobe aria-label="刷新电台库" testId="globe-refresh" appearance="none" padding=0
-                      row width=36 height=36 border-radius=18 align-items="center" justify-content="center"
-                        background-color="rgba(255, 255, 255, 0.86)" backdrop-filter="blur(18px)"
-                        border="1px solid rgba(15, 23, 42, 0.10)"
-                        image "symbol:radio" width=16 height=16 color="#2563EB"
-                  column position="absolute" left=14 bottom=170 gap=4 align-items="flex-start"
-                    if not hasCurrent or busy
-                      text (busy ? "正在换台…" : "点图钉播放电台（已热更新）")
-                        font="-exact-caption1" color="#334155" testId="radio-hint"
-                        background-color="rgba(255, 255, 255, 0.86)" border-radius=8 padding="3px 8px"
-              else if e.name == "nowHome" or e.name == "nowRadio" or e.name == "nowFavorites"
-                column flex=1 position="relative" justify-content="flex-end" press=collapse testId="player-scrim"
-                  background-color="-exact-grouped-background"
-                  column box-sizing="border-box" width="100%" max-height="94%" gap=14
-                    press=noop testId="player-panel" background-color="-exact-background"
-                    border-top-left-radius=28 border-top-right-radius=28
-                    box-shadow="0 -18px 44px rgba(8, 16, 30, 0.16)"
-                    padding-left=20 padding-right=20 padding-bottom=20
-                    padding-top="calc(12px + var(--exact-safe-area-inset-top))"
-                    row align-items="center" gap=8
-                      button press=collapse testId="player-collapse" aria-label="收起" appearance="none" padding="6px 4px"
-                        row align-items="center" gap=4
-                          svg width=14 height=14 viewBox="0 0 24 24"
-                            path d="M6 9l6 6 6-6" fill="none" stroke=("AccentColor") stroke-width=2.6 stroke-linecap="round" stroke-linejoin="round"
-                          text "收起" font="-exact-subheadline" color="AccentColor"
-                      view flex=1
-                      text "正在播放" font="-exact-subheadline" font-weight=600
-                      view flex=1
-                    column flex=1 min-height=0 align-items="center" justify-content="center" gap=16
-                      if curFavicon != ""
-                        image curFavicon width=280 height=280 border-radius=20 box-shadow="0 18px 40px rgba(8, 16, 30, 0.22)"
-                      else
-                        view width=280 height=280 border-radius=20 background-color="-exact-tertiary-background"
-                          align-items="center" justify-content="center" box-shadow="0 18px 40px rgba(8, 16, 30, 0.22)"
-                          image "symbol:radio" width=64 height=64 color="-exact-secondary-label"
-                      column gap=6 align-items="center"
-                        text curName font="-exact-title2" font-weight=700 text-align="center" line-clamp=2 testId="panel-name"
-                        text curTagline font="-exact-footnote" color="-exact-secondary-label" text-align="center" line-clamp=1
-                        row gap=8 align-items="center"
-                          if wantPlay
-                            LiveBadge()
-                          text curDetail font="-exact-caption2" color="-exact-secondary-label"
-                    if failedPlayer
-                      row align-items="center" gap=8
-                        image "symbol:alert" width=16 height=16 color="-exact-system-red"
-                        text errorHint font="-exact-footnote" color="-exact-system-red" flex=1 testId="player-error"
-                        button press=retry testId="player-retry" "重试"
-                        button press=nextStation testId="player-next-2" "换一台"
-                    row align-items="center" justify-content="center" gap=20 width="100%"
-                      button press=saveCurrent testId="panel-save" aria-label="收藏" appearance="none" padding=0
-                        view width=56 height=56 position="relative"
-                          view position="absolute" inset=0 border-radius=28 background-color="-exact-secondary-background"
-                          image (saved(favs, currentId) ? "symbol:star-fill" : "symbol:star") width=22 height=22
-                            position="absolute" left=17 top=17 color="-exact-system-yellow"
-                      button press=togglePlay testId="panel-toggle" aria-label="播放" appearance="none" padding=0
-                        view width=56 height=56 position="relative"
-                          view position="absolute" inset=0 border-radius=28
-                            background-color=(busy ? "-exact-secondary-background" : "AccentColor")
-                          image (busy ? "symbol:circle" : wantPlay ? "symbol:pause" : "symbol:play") width=24 height=24
-                            position="absolute" left=16 top=16 color=(busy ? "-exact-secondary-label" : "#FFFFFF")
-                      button press=tune testId="panel-next" aria-label="下一个电台" appearance="none" padding=0
-                        column width=56 height=56 border-radius=28 align-items="center" justify-content="center"
-                          background-color="-exact-secondary-background"
-                          if busy
-                            image "symbol:circle" width=22 height=22 color="AccentColor"
-                              animation="pulse 1s ease-in-out infinite"
-                          else
-                            NextIcon(size=22)
-                    column gap=8
-                      row align-items="center" gap=10
-                        input type="range" value=volume input=setVolume min=0 max=1 step=0.05 flex=1 testId="panel-volume"
-                        button press=toggleMute aria-label=(volume > 0 ? "静音" : "取消静音") appearance="none" padding=2 testId="panel-mute"
-                          image (volume > 0 ? "symbol:speaker" : "symbol:speaker-mute") width=16 height=16 color="-exact-secondary-label"
+              else if e.name == "history"
+                scroll flex=1 min-height=0
+                  column gap=20 padding=`calc(6px + var(--exact-safe-area-inset-top)) 20px 24px`
+                    text t("tab-footprint") font-size="1.875rem" font-weight=700 testId="title-history"
+                    column border-radius=24 background-color="card" padding="20px 22px" testId="foot-stats"
+                      row gap=12
+                        column flex=1 gap=2
+                          text foot.countryCount.toFixed(0) font-size="3rem" font-weight=700 line-height=1.3 color="amber"
+                          text t("foot-countries") font-size="0.875rem" color="creamMut"
+                        column flex=1 gap=2
+                          text foot.stationCount.toFixed(0) font-size="3rem" font-weight=700 line-height=1.3 color="creamText"
+                          text t("foot-stations") font-size="0.875rem" color="creamMut"
+                    if foot.stationCount == 0
+                      text t("foot-empty")
+                        font-size="0.875rem" color="muted" text-align="center" padding="16px 12px" testId="foot-empty"
+                    else
+                      column gap=10
+                        text t("foot-places") font-size="0.6875rem" color="muted"
+                        row flex-wrap="wrap" gap=8
+                          for c in foot.countries key=c.cc
+                            row min-height=34 padding="0 12px" border-radius=17 background-color="panel"
+                              align-items="center" gap=6
+                              text c.flag font-size="1.0625rem" line-height=1.3
+                              text `×${c.count.toFixed(0)}` font-size="0.75rem" font-weight=500 color="muted"
+                      column gap=10
+                        text t("foot-recent") font-size="0.6875rem" color="muted"
+                        for r in foot.recent.slice(0, 12) key=r.station.id
+                          row -exact-press-scale=0.96 press=play(r.station) testId=`recent-${r.station.id}` gap=12 align-items="center"
+                            padding="12px 16px" border-radius=18 background-color="panel"
+                            column flex=1 min-width=0 gap=3
+                              text r.station.name font-size="0.9375rem" font-weight=600 line-clamp=1
+                              text r.place font-size="0.78125rem" color="muted" line-clamp=1
+                            text agoLabel(r.agoKind, r.agoN) font-size="0.75rem" color="muted"
 
-      if (hasCurrent or nav.tab == "radio") and not inNow
-        row testId="player-bar" align-items="center" gap=10 padding="6px 10px" min-height=56
-          position="absolute" left=12 right=12 bottom=90 border-radius=20 max-width="22rem"
-          margin-left="auto" margin-right="auto" backgroundMaterial="regular"
-          backdrop-filter="blur(24px) saturate(1.4)" box-shadow="0 10px 26px rgba(8, 16, 30, 0.16)"
-          if hasCurrent
-            row press=expand testId="player-open" align-items="center" gap=10 flex=1 min-width=0 aria-label="打开播放面板"
-              if curFavicon != ""
-                image curFavicon width=40 height=40 border-radius=10
-              else
-                view width=40 height=40 border-radius=10 background-color="-exact-tertiary-background"
-                  align-items="center" justify-content="center"
-                  image "symbol:radio" width=18 height=18 color="-exact-secondary-label"
-              column flex=1 gap=1 min-width=0
-                text curName font="-exact-subheadline" line-clamp=1 testId="player-name"
-                text curTagline font="-exact-caption2" color="-exact-secondary-label" line-clamp=1
-            if wantPlay
-              LiveBadge()
-            button press=togglePlay testId="player-toggle" aria-label=(wantPlay ? "暂停" : "播放") appearance="none" padding=0
-              column width=44 height=44 border-radius=22 align-items="center" justify-content="center"
-                if busy
-                  image "symbol:circle" width=18 height=18 color="-exact-tertiary-label" animation="pulse 1s ease-in-out infinite"
-                else if wantPlay
-                  image "symbol:pause" width=18 height=18 color="AccentColor"
-                else
-                  image "symbol:play" width=18 height=18 color="AccentColor"
-            button press=tune testId="player-next" aria-label="下一个电台" appearance="none" padding=0
-              column width=44 height=44 border-radius=22 align-items="center" justify-content="center"
-                if busy
-                  image "symbol:circle" width=18 height=18 color="AccentColor" animation="pulse 1s ease-in-out infinite"
-                else
-                  NextIcon(size=20)
-          else
-            row press=tune align-items="center" gap=10 flex=1 min-width=0
-              view width=40 height=40 border-radius=10 background-color="-exact-tertiary-background"
-                align-items="center" justify-content="center"
-                image "symbol:radio" width=18 height=18 color="-exact-secondary-label"
-              column flex=1 gap=1 min-width=0
-                text "还没在播" font="-exact-subheadline" testId="player-idle"
-                text "点右边的箭头，随机开一台" font="-exact-caption2" color="-exact-secondary-label"
-              button press=tune testId="player-next" aria-label="随机开一台" appearance="none" padding=0
-                column width=44 height=44 border-radius=22 align-items="center" justify-content="center"
-                  if busy
-                    image "symbol:circle" width=18 height=18 color="AccentColor" animation="pulse 1s ease-in-out infinite"
-                  else
-                    NextIcon(size=20)
+      row role="tablist" testId="tabs" flex=0 accent-color="brand"
+        padding=`8px 18px max(26px, var(--exact-safe-area-inset-bottom))` border-top-color="hairline" border-top-style="solid" border-top-width="1px" background-color="paper"
+        for t in nav.tabs key=t.name
+          button role="tab" -exact-press-scale=0.96 press=selectTab(t.name) testId=`tab-${t.name}` aria-controls=`panel-${t.name}`
+            aria-selected=(nav.tab == t.name) appearance="none" flex=1 min-height=0 padding=0
+            display="flex" flex-direction="column" align-items="center" justify-content="center" gap=6
+            image (t.name == "radio" ? "symbol:radio" : t.name == "favorites" ? "symbol:heart" : "symbol:pin")
+              width="1.375rem" height="1.375rem" color=(nav.tab == t.name ? "brand" : "tabInactive")
+            text t.name == "radio" ? t("tab-radio") : t.name == "favorites" ? t("tab-favorites") : t("tab-footprint")
+              font-size="min(-exact-caption1, 12px)" font-weight=600 color=(nav.tab == t.name ? "ink" : "tabInactive")
 
-      row role="tablist" testId="tabs" appearance="none" position="absolute" left=12 right=12 bottom=24 height=56
-        max-width="22rem" margin-left="auto" margin-right="auto" border-radius=28 align-items="stretch"
-        justify-content="center" backgroundMaterial="glass" backdrop-filter="blur(24px) saturate(1.4)"
-        box-shadow="0 10px 26px rgba(8, 16, 30, 0.16)"
-        button role="tab" press=selectTab("home") testId="tab-home" aria-controls="panel-home"
-          aria-selected=(nav.tab == "home") appearance="none" flex=1 min-height=0 padding=0
-          display="flex" flex-direction="column" align-items="center" justify-content="center" gap=2 max-width="12rem"
-          image "symbol:home" width=22 height=22 color=(nav.tab == "home" ? "AccentColor" : "-exact-secondary-label")
-          text "发现" font="-exact-caption2" color=(nav.tab == "home" ? "AccentColor" : "-exact-secondary-label")
-        button role="tab" press=selectTab("radio") testId="tab-radio" aria-controls="panel-radio"
-          aria-selected=(nav.tab == "radio") appearance="none" flex=1 min-height=0 padding=0
-          display="flex" flex-direction="column" align-items="center" justify-content="center" gap=2 max-width="12rem"
-          svg width=22 height=22 viewBox="0 0 24 24"
-            circle cx=12 cy=12 r=9 fill="none" stroke=(nav.tab == "radio" ? "AccentColor" : "-exact-secondary-label") stroke-width=1.5
-            path d="M12 3c2.7 0 4.5 4 4.5 9s-1.8 9-4.5 9-4.5-4-4.5-9 1.8-9 4.5-9" fill="none"
-              stroke=(nav.tab == "radio" ? "AccentColor" : "-exact-secondary-label") stroke-width=1.3
-            path d="M3.6 9.3h16.8" fill="none" stroke=(nav.tab == "radio" ? "AccentColor" : "-exact-secondary-label") stroke-width=1.1
-            path d="M3.6 14.7h16.8" fill="none" stroke=(nav.tab == "radio" ? "AccentColor" : "-exact-secondary-label") stroke-width=1.1
-          text "世界" font="-exact-caption2" color=(nav.tab == "radio" ? "AccentColor" : "-exact-secondary-label")
-        button role="tab" press=selectTab("favorites") testId="tab-favorites" aria-controls="panel-favorites"
-          aria-selected=(nav.tab == "favorites") appearance="none" flex=1 min-height=0 padding=0
-          display="flex" flex-direction="column" align-items="center" justify-content="center" gap=2 max-width="12rem"
-          image "symbol:star" width=22 height=22 color=(nav.tab == "favorites" ? "AccentColor" : "-exact-secondary-label")
-          text "收藏" font="-exact-caption2" color=(nav.tab == "favorites" ? "AccentColor" : "-exact-secondary-label")
+      if toastOn
+        row position="absolute" top=`calc(10px + var(--exact-safe-area-inset-top))` left=20 right=20 justify-content="center" testId="toast" aria-live="polite"
+          view padding="11px 16px" border-radius=14 background-color="toastDark" max-width=320
+            box-shadow="0 8px 20px rgba(42,29,21,.3)"
+            text toastText font-size="min(-exact-footnote, 13.5px)" color="iconCream" text-align="center"
 
-// One station in any list — art (or the radio glyph), name, tagline, and a
-// mark on whatever is playing. Shared by the tag, country, search and
-// favorites feeds.
-component StationRow
-  props
-    s: Station
-    onTap: action
-    active: bool
-  view
-    row press=onTap testId=`station-${s.id}` gap=12 align-items="center" padding="6px 16px" border-bottom="1px solid -exact-separator"
-      if s.favicon != ""
-        image s.favicon width=52 height=52 border-radius=12
-      else
-        view width=52 height=52 border-radius=12 background-color="-exact-tertiary-background" align-items="center" justify-content="center"
-          image "symbol:radio" width=22 height=22 color="-exact-secondary-label"
-      column flex=1 gap=2 min-width=0
-        text s.name font="-exact-subheadline" line-clamp=1
-        text s.tagline font="-exact-caption2" color="-exact-secondary-label" line-clamp=1
-      if active
-        image "symbol:waveform" width=18 height=18 color="AccentColor"
-
-component LiveBadge
-  view
-    row padding="2px 7px" border-radius=6 background-color="#E5484D"
-      text "LIVE" font="-exact-caption2" font-weight=700 color="#FFFFFF"
-
-component NextIcon
-  props
-    size: number
-  view
-    svg width=size height=size viewBox="0 0 24 24"
-      path d="M5 5l7 7-7 7" fill="none" stroke="AccentColor" stroke-width=2.4 stroke-linecap="round"
-      path d="M12 5l7 7-7 7" fill="none" stroke="AccentColor" stroke-width=2.4 stroke-linecap="round"
+      if sheetOpen
+        view position="absolute" inset=0 -exact-press-opacity=0.75 press=closeSheet testId="sheet-scrim"
+          background-color=`light-dark(rgba(42,29,21,.42), rgba(0,0,0,.55))`
+          view position="absolute" left=0 top=0 width="100%" height=60 -exact-press-opacity=0.75 press=closeSheet testId="sheet-scrim-top" appearance="none"
+        column position="absolute" left=0 right=0 bottom=0 -exact-press-opacity=0.75 press=noop testId="filter-sheet"
+          background-color="paper" border-top-left-radius=30 border-top-right-radius=30
+          padding="12px 22px 34px" gap=20 box-shadow="0 -10px 30px rgba(42,29,21,.2)"
+          view width=40 height=5 border-radius=3 background-color="dash" align-self="center"
+          column gap=4
+            text t("sheet-title") font-size="1.375rem" font-weight=700 testId="sheet-title"
+            text t("sheet-sub") font-size="0.875rem" color="muted"
+          column gap=10
+            text t("sheet-regions") font-size="0.6875rem" color="muted"
+            row flex-wrap="wrap" gap=8
+              button -exact-press-scale=0.96 press=flipAllRegions testId="region-all" appearance="none" padding=0 aria-pressed=(draftRegions.length == 0)
+                view min-height=40 padding="0 16px" border-radius=20 display="flex" align-items="center" justify-content="center"
+                  border="1.5px solid ink" background-color=chipOn(draftRegions.length == 0)
+                  text t("filter-world") font-size="min(-exact-subheadline, 14px)" font-weight=500 color=chipFg(draftRegions.length == 0)
+              for k in regionKeys key=k
+                button -exact-press-scale=0.96 press=flipRegion(k) testId=`region-${k}` appearance="none" padding=0 aria-pressed=draftRegions.includes(k)
+                  view min-height=40 padding="0 16px" border-radius=20 display="flex" align-items="center" justify-content="center"
+                    border="1.5px solid ink" background-color=chipOn(draftRegions.includes(k))
+                    text regionName(k) font-size="min(-exact-subheadline, 14px)" font-weight=500 color=chipFg(draftRegions.includes(k))
+          column gap=10
+            text t("sheet-genre") font-size="0.6875rem" color="muted"
+            row flex-wrap="wrap" gap=8
+              for k in genreKeys key=k
+                button -exact-press-scale=0.96 press=setGenre(k) testId=`genre-${k}` appearance="none" padding=0 aria-pressed=(draftGenre == k)
+                  view min-height=40 padding="0 16px" border-radius=20 display="flex" align-items="center" justify-content="center"
+                    border="1.5px solid ink" background-color=chipOn(draftGenre == k)
+                    text genreName(k) font-size="min(-exact-subheadline, 14px)" font-weight=500 color=chipFg(draftGenre == k)
+          button -exact-press-scale=0.96 press=applySheet testId="apply-sheet" appearance="none" padding=0
+            view min-height=54 border-radius=27 display="flex" align-items="center" justify-content="center"
+              background-color="brand" box-shadow="0 4px 0 #C2401F"
+              text t("sheet-apply") font-size="min(-exact-callout, 16px)" font-weight=700 color="brandInk"

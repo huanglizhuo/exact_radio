@@ -21,3 +21,9 @@ airwave/app.contract.d.ts
 
 # web/ is the committed Pages build (see scripts/publish-web.sh)
 origin/
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+!.env.example

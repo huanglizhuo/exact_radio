@@ -1,15 +1,18 @@
 {
   "$schema": "../.extern/exact/scripts/app.schema.json",
-  "name": "Airwave",
-  "short_name": "Airwave",
+  "name": "漫游电台",
+  "short_name": "漫游电台",
   "id": "com.lizhuo.airwave",
   "start_url": "/",
   "display": "standalone",
-  "theme_color": "#111113",
+  "theme_color": "#F4ECDF",
   "audio_session": "playback",
   "app": {
     "id": "com.lizhuo.airwave",
-    "name": "Airwave"
+    "name": "漫游电台"
+  },
+  "strings": {
+    "base": "zh"
   },
   "host": {
     "web": {
@@ -29,7 +32,7 @@
         {
           "meta": {
             "name": "apple-mobile-web-app-title",
-            "content": "Airwave"
+            "content": "漫游电台"
           }
         }
       ]
@@ -81,17 +84,129 @@
       "purpose": "any maskable"
     }
   ],
-  "userInterfaceStyle": "light",
-  "packages": {
-    "@exact/maps": {
-      "web": {
-        "tiles": "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-        "attribution": "© OpenStreetMap contributors",
-        "maxZoom": 19
+  "userInterfaceStyle": "automatic",
+  "verify": {
+    "accept": [
+      {
+        "finding": "covered",
+        "node": "sheet-*",
+        "why": "The filter sheet is a modal overlay; covering the face and tab bar behind it while open is the design."
       },
-      "android": {
-        "apiKey": { "env": "EXACT_GOOGLE_MAPS_API_KEY" }
+      {
+        "finding": "covered",
+        "node": "tab-*",
+        "why": "The modal filter sheet covers the tab bar while open; that is what a modal sheet does."
+      },
+      {
+        "finding": "covered",
+        "node": "shuffle",
+        "why": "Covered by the modal filter sheet while it is open."
+      },
+      {
+        "finding": "covered",
+        "node": "fav-button",
+        "why": "Covered by the modal filter sheet while it is open."
+      },
+      {
+        "finding": "covered",
+        "node": "play-toggle",
+        "why": "Covered by the modal filter sheet while it is open."
+      },
+      {
+        "finding": "covered",
+        "node": "open-filter",
+        "why": "Covered by the modal sheet scrim while the sheet is open."
+      },
+      {
+        "finding": "overlap",
+        "node": "sheet-*",
+        "why": "The modal sheet grows over the scrim's tap area as its content grows; the scrim stays a tap target by design."
+      },
+      {
+        "finding": "overlap",
+        "node": "tab-*",
+        "why": "The modal sheet's apply bar overlaps the tab bar while the sheet is open."
+      },
+      {
+        "finding": "overlap",
+        "node": "shuffle",
+        "why": "The modal sheet's content overlaps the shuffle button while the sheet is open."
+      },
+      {
+        "finding": "overlap",
+        "node": "fav-button",
+        "why": "The modal sheet's content overlaps the fav button while the sheet is open."
+      },
+      {
+        "finding": "overlap",
+        "node": "play-toggle",
+        "why": "The modal sheet's content overlaps the play button while the sheet is open."
+      },
+      {
+        "finding": "overlap",
+        "node": "open-filter",
+        "why": "The transient toast passes over the header controls for its 2.6s life; it is announced via aria-live."
+      },
+      {
+        "finding": "covered",
+        "node": "toast",
+        "why": "The transient toast passes over the header row for its 2.6s life; it is announced via aria-live."
+      },
+      {
+        "finding": "covered",
+        "node": "sheet-scrim-top",
+        "why": "The scrim's top tap strip sits over the header and the sheet's top; it is a tap target, not content."
+      },
+      {
+        "finding": "overlap",
+        "node": "sheet-scrim-top",
+        "why": "The scrim's top tap strip grows under the sheet at the largest text size; it is a tap target, not content."
+      },
+      {
+        "finding": "covered",
+        "node": "locale-title",
+        "why": "The full-screen modal scrim covers the header while the filter sheet is open."
+      },
+      {
+        "finding": "covered",
+        "node": "dial-*",
+        "why": "The full-screen modal scrim covers the radio face while the filter sheet is open."
+      },
+      {
+        "finding": "covered",
+        "node": "status-label",
+        "why": "The full-screen modal scrim covers the radio face while the filter sheet is open."
+      },
+      {
+        "finding": "covered",
+        "node": "freq-label",
+        "why": "The full-screen modal scrim covers the radio face while the filter sheet is open."
+      },
+      {
+        "finding": "covered",
+        "node": "now-title",
+        "why": "The full-screen modal scrim covers the radio face while the filter sheet is open."
+      },
+      {
+        "finding": "covered",
+        "node": "now-sub",
+        "why": "The full-screen modal scrim covers the radio face while the filter sheet is open."
+      },
+      {
+        "finding": "covered",
+        "node": "hint",
+        "why": "The modal sheet grows over the hint line while it is open."
+      },
+      {
+        "finding": "covered",
+        "node": "locale-title",
+        "why": "The transient toast passes over the header for its 2.6s life; it is announced via aria-live."
+      },
+      {
+        "finding": "overlap",
+        "node": "locale-title",
+        "why": "The transient toast passes over the header title for its 2.6s life; it is announced via aria-live."
       }
-    }
+    ]
   }
 }

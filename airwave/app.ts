@@ -1,30 +1,23 @@
-// Airwave — the data module. `app.contract` is the view.
+// 漫游电台 Roam Radio — the data module. `app.contract` is the view.
 //
 // radio-browser is an open, non-commercial index of ~52k stations: no key, no account,
 // CORS open. Its house rules ask for an identifiable User-Agent and one `/json/url/{uuid}`
 // per play (which we send from `pushRecent`), and that clients never hard-code one server.
 import type { Answer, Sources } from './app.contract.d.ts';
-import { buildDataset, haversine, nearestIn, parseSeed, type Dataset, type SeedRow } from './globe';
-import { GLOBE_SEED } from './data/globe-seed';
 
 const PRIMARY = 'https://de1.api.radio-browser.info';
 const ALIAS = 'https://all.api.radio-browser.info';
 const FAVORITES = 'app:/data/favorites.json';
 const RECENT = 'app:/data/recent.json';
-const RECENT_LIMIT = 20;
-const SEARCHES = 'app:/data/searches.json';
-const SEARCH_LIMIT = 8;
-const PAGE = 40;
-const GLOBE_CACHE = 'app:/cache/globe.json';
-const UA = 'Airwave/0.1 (Exact; radio-browser client)';
+const RECENT_LIMIT = 80;
+const PREFS = 'app:/data/prefs.json';
+const UA = 'RoamRadio/0.2 (Exact; radio-browser client)';
 
 export const grants = [
   `net.fetch ${PRIMARY}`,
   `net.fetch ${ALIAS}`,
   'fs.read app:/data',
   'fs.write app:/data',
-  'fs.read app:/cache',
-  'fs.write app:/cache',
 ].join('\n');
 
 type Station = {
@@ -36,25 +29,34 @@ type Station = {
   fallback: string;
   favicon: string;
   country: string;
+  /** English display name kept raw so reads can localize per locale. */
+  countryEn: string;
   countryCode: string;
   tags: string[];
   codec: string;
   bitrate: number;
   votes: number;
   clicks: number;
+  flag: string;
   frequency: number;
   lat: number;
   lon: number;
-  /** Set only by `nearest`: how far this station is from the point the user picked. */
   distanceKm: number;
 };
 
-/** A stable "dial position" per station, so the radio face reads the same every time. */
+/** The country's flag emoji from its ISO code, for the favorites tile. */
+function flagOf(cc: string): string {
+  return /^[A-Z]{2}$/.test(cc)
+    ? String.fromCodePoint(...[...cc].map((c) => 0x1f1e6 + c.charCodeAt(0) - 65))
+    : '\u{1F310}';
+}
+
+/** A stable "dial position" per station, so the tuner reads the same every time. */
 function emptyStation(): Station {
   return {
     id: '', name: '', tagline: '', stream: '', fallback: '', favicon: '',
-    country: '', countryCode: '', tags: [], codec: '', bitrate: 0, votes: 0,
-    clicks: 0, frequency: 0, lat: 0, lon: 0, distanceKm: 0,
+    country: '', countryEn: '', countryCode: '', flag: '', tags: [], codec: '', bitrate: 0, votes: 0,
+    clicks: 0, frequency: 87.5, lat: 0, lon: 0, distanceKm: 0,
   };
 }
 
@@ -82,7 +84,6 @@ const decoder = new TextDecoder();
 // Only HTTPS streams: iOS/macOS are not asked to relax App Transport Security
 // (`appTransportSecurity`), and a page served over HTTPS cannot load an HTTP
 // stream anyway. That is roughly two thirds of the index.
-const FILTERS = { hidebroken: 'true', is_https: 'true', order: 'clickcount', reverse: 'true' };
 
 function qs(params: Record<string, string | number>): string {
   return Object.keys(params)
@@ -115,124 +116,91 @@ function asNumber(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }
 
+// ── the shuffle pool ─────────────────────────────────────────────────────────
+// The filter sheet names regions (multi-select) and one genre; the picker, like
+// the prototype, jumps to a random country inside the choice and draws from a
+// cached pool so repeated taps stay fast and rarely repeat.
 
-// ── the globe ────────────────────────────────────────────────────────────────
-// The world view draws itself (airwave/globe.ts) from the dataset held here:
-// the cached fetch first, then the seed baked in at native build time, then a
-// live fetch. `globeLoad(rev)` is asked twice — rev 1 boots from disk, a later
-// rev (the once-per-launch task, or the refresh button) refetches and rewrites
-// the cache.
-let globeData: Dataset | null = null;
-let globeLoading = false;
+const REGIONS: Record<string, string[]> = {
+  asia: ['CN', 'JP', 'KR', 'IN', 'ID', 'TH', 'VN', 'PH', 'MY', 'SG', 'TW', 'HK', 'TR', 'IR'],
+  europe: ['GB', 'FR', 'DE', 'IT', 'ES', 'PT', 'NL', 'SE', 'NO', 'FI', 'PL', 'GR', 'IE', 'CZ', 'UA', 'AT', 'IS'],
+  africa: ['NG', 'KE', 'ZA', 'EG', 'MA', 'GH', 'SN', 'ET', 'TZ', 'UG'],
+  americas: ['US', 'CA', 'MX', 'BR', 'AR', 'CO', 'CL', 'PE', 'CU', 'JM'],
+  oceania: ['AU', 'NZ', 'FJ', 'PG'],
+};
 
-// Five real stations: what tests and the bake see, where every fetch refuses.
-const GLOBE_SAMPLE: SeedRow[] = [
-  ['bbc-world', 'BBC World Service', 'https://stream.live.vc.bbcmedia.co.uk/bbc_world_service', 51.5, -0.12, '', 'AAC', 0, 'GB', 'news', 900],
-  ['radio-france', 'France Inter', 'https://icecast.radiofrance.fr/franceinter-midfi.mp3', 48.86, 2.35, '', 'MP3', 128, 'FR', 'general', 500],
-  ['nhk-tokyo', 'NHK Radio 1', 'https://netradio-live2.nhk.jp/hls/live/200170/nhkradiru1l/master.m3u8', 35.68, 139.69, '', 'AAC', 0, 'JP', 'news', 400],
-  ['kexp-seattle', 'KEXP', 'https://kexp.streamguys1.com/kexp160.aac', 47.6, -122.33, '', 'AAC', 160, 'US', 'alternative', 800],
-  ['abc-sydney', 'ABC Triple J', 'https://live-radio01.mediahubaustralia.com/2TJW/aac/', -33.87, 151.21, '', 'AAC', 128, 'AU', 'alternative', 300],
-];
+const GENRE_TAG: Record<string, string> = {
+  pop: 'pop',
+  jazz: 'jazz',
+  classical: 'classical',
+  rock: 'rock',
+  electronic: 'electronic',
+  news: 'news',
+  folk: 'folk',
+};
 
-// The baked seed is already row arrays (a literal, not JSON text — escapes that
-// a template literal would evaluate made JSON.parse quietly corrupt it).
-function seedRows(seed: unknown): SeedRow[] {
-  if (!Array.isArray(seed)) return [];
-  return seed.filter(
-    (row): row is SeedRow =>
-      Array.isArray(row) && row.length >= 11 && typeof row[0] === 'string' && typeof row[3] === 'number',
-  );
-}
+const CC_ZH: Record<string, string> = {
+  CN: '中国', JP: '日本', KR: '韩国', IN: '印度', ID: '印度尼西亚', TH: '泰国', VN: '越南',
+  PH: '菲律宾', MY: '马来西亚', SG: '新加坡', TW: '中国台湾', HK: '中国香港', TR: '土耳其', IR: '伊朗',
+  GB: '英国', FR: '法国', DE: '德国', IT: '意大利', ES: '西班牙', PT: '葡萄牙', NL: '荷兰',
+  SE: '瑞典', NO: '挪威', FI: '芬兰', PL: '波兰', GR: '希腊', IE: '爱尔兰', CZ: '捷克',
+  UA: '乌克兰', AT: '奥地利', IS: '冰岛', CH: '瑞士', BE: '比利时', DK: '丹麦', RU: '俄罗斯',
+  HU: '匈牙利', RO: '罗马尼亚', RS: '塞尔维亚', HR: '克罗地亚', NG: '尼日利亚', KE: '肯尼亚',
+  ZA: '南非', EG: '埃及', MA: '摩洛哥', GH: '加纳', SN: '塞内加尔', ET: '埃塞俄比亚',
+  TZ: '坦桑尼亚', UG: '乌干达', US: '美国', CA: '加拿大', MX: '墨西哥', BR: '巴西',
+  AR: '阿根廷', CO: '哥伦比亚', CL: '智利', PE: '秘鲁', CU: '古巴', JM: '牙买加',
+  AU: '澳大利亚', NZ: '新西兰', FJ: '斐济', PG: '巴布亚新几内亚',
+  DZ: '阿尔及利亚', TN: '突尼斯', LY: '利比亚', CM: '喀麦隆', CI: '科特迪瓦',
+  ZW: '津巴布韦', ZM: '赞比亚', MZ: '莫桑比克', RW: '卢旺达', BW: '博茨瓦纳',
+  NA: '纳米比亚', MU: '毛里求斯', BF: '布基纳法索', ML: '马里', NE: '尼日尔',
+  TD: '乍得', MG: '马达加斯加', SK: '斯洛伐克', SI: '斯洛文尼亚',
+  BG: '保加利亚', LT: '立陶宛', LV: '拉脱维亚', EE: '爱沙尼亚', BY: '白俄罗斯',
+  CY: '塞浦路斯', LU: '卢森堡', MT: '马耳他', MD: '摩尔多瓦', AL: '阿尔巴尼亚',
+  BA: '波黑', MK: '北马其顿', ME: '黑山', GE: '格鲁吉亚', AM: '亚美尼亚',
+  AZ: '阿塞拜疆', KZ: '哈萨克斯坦', SA: '沙特阿拉伯', AE: '阿联酋', IL: '以色列',
+  JO: '约旦', LB: '黎巴嫩', IQ: '伊拉克', PK: '巴基斯坦', BD: '孟加拉国',
+  LK: '斯里兰卡', NP: '尼泊尔', KH: '柬埔寨', LA: '老挝', MN: '蒙古',
+  DO: '多米尼加', PA: '巴拿马', CR: '哥斯达黎加', GT: '危地马拉', HN: '洪都拉斯',
+  NI: '尼加拉瓜', SV: '萨尔瓦多', VE: '委内瑞拉', EC: '厄瓜多尔', BO: '玻利维亚',
+  PY: '巴拉圭', UY: '乌拉圭', PR: '波多黎各', TT: '特立尼达和多巴哥',
+  BS: '巴哈马', HT: '海地', GY: '圭亚那', SR: '苏里南', BZ: '伯利兹',
+};
 
-async function bootGlobe(storage: Storage): Promise<{ rev: number; count: number; origin: string }> {
-  try {
-    const bytes = await storage.fs.readFile(GLOBE_CACHE);
-    const rows = parseSeed(decoder.decode(bytes));
-    if (rows.length > 0) {
-      globeData = buildDataset(rows, 'cache');
-      return { rev: 1, count: rows.length, origin: 'cache' };
-    }
-  } catch {
-    // Nothing cached yet — the seed or the fetch takes over.
-  }
-  const seeded = seedRows(GLOBE_SEED);
-  if (seeded.length > 0) {
-    globeData = buildDataset(seeded, 'seed');
-    return { rev: 1, count: seeded.length, origin: 'seed' };
-  }
-  // Nothing on disk and nothing baked in (the web build): pull the whole set now.
-  try {
-    return await fetchGlobe(1, storage);
-  } catch {
-    // Tests and the bake: the index's answers there carry no usable coordinates,
-    // so the sample keeps the globe drawable and deterministic.
-    globeData = buildDataset(GLOBE_SAMPLE, 'sample');
-    return { rev: 1, count: GLOBE_SAMPLE.length, origin: 'sample' };
-  }
-}
+const CC_EN: Record<string, string> = {
+  CN: 'China', JP: 'Japan', KR: 'South Korea', IN: 'India', ID: 'Indonesia', TH: 'Thailand', VN: 'Vietnam',
+  PH: 'Philippines', MY: 'Malaysia', SG: 'Singapore', TW: 'Taiwan', HK: 'Hong Kong', TR: 'Türkiye', IR: 'Iran',
+  GB: 'United Kingdom', FR: 'France', DE: 'Germany', IT: 'Italy', ES: 'Spain', PT: 'Portugal', NL: 'Netherlands',
+  SE: 'Sweden', NO: 'Norway', FI: 'Finland', PL: 'Poland', GR: 'Greece', IE: 'Ireland', CZ: 'Czechia',
+  UA: 'Ukraine', AT: 'Austria', IS: 'Iceland', CH: 'Switzerland', BE: 'Belgium', DK: 'Denmark', RU: 'Russia',
+  HU: 'Hungary', RO: 'Romania', RS: 'Serbia', HR: 'Croatia', NG: 'Nigeria', KE: 'Kenya',
+  ZA: 'South Africa', EG: 'Egypt', MA: 'Morocco', GH: 'Ghana', SN: 'Senegal', ET: 'Ethiopia',
+  TZ: 'Tanzania', UG: 'Uganda', US: 'United States', CA: 'Canada', MX: 'Mexico', BR: 'Brazil',
+  AR: 'Argentina', CO: 'Colombia', CL: 'Chile', PE: 'Peru', CU: 'Cuba', JM: 'Jamaica',
+  AU: 'Australia', NZ: 'New Zealand', FJ: 'Fiji', PG: 'Papua New Guinea',
+  DZ: 'Algeria', TN: 'Tunisia', LY: 'Libya', CM: 'Cameroon', CI: "Côte d'Ivoire",
+  ZW: 'Zimbabwe', ZM: 'Zambia', MZ: 'Mozambique', RW: 'Rwanda', BW: 'Botswana',
+  NA: 'Namibia', MU: 'Mauritius', BF: 'Burkina Faso', ML: 'Mali', NE: 'Niger',
+  TD: 'Chad', MG: 'Madagascar', SK: 'Slovakia', SI: 'Slovenia',
+  BG: 'Bulgaria', LT: 'Lithuania', LV: 'Latvia', EE: 'Estonia', BY: 'Belarus',
+  CY: 'Cyprus', LU: 'Luxembourg', MT: 'Malta', MD: 'Moldova', AL: 'Albania',
+  BA: 'Bosnia and Herzegovina', MK: 'North Macedonia', ME: 'Montenegro', GE: 'Georgia', AM: 'Armenia',
+  AZ: 'Azerbaijan', KZ: 'Kazakhstan', SA: 'Saudi Arabia', AE: 'United Arab Emirates', IL: 'Israel',
+  JO: 'Jordan', LB: 'Lebanon', IQ: 'Iraq', PK: 'Pakistan', BD: 'Bangladesh',
+  LK: 'Sri Lanka', NP: 'Nepal', KH: 'Cambodia', LA: 'Laos', MN: 'Mongolia',
+  DO: 'Dominican Republic', PA: 'Panama', CR: 'Costa Rica', GT: 'Guatemala', HN: 'Honduras',
+  NI: 'Nicaragua', SV: 'El Salvador', VE: 'Venezuela', EC: 'Ecuador', BO: 'Bolivia',
+  PY: 'Paraguay', UY: 'Uruguay', PR: 'Puerto Rico', TT: 'Trinidad and Tobago',
+  BS: 'Bahamas', HT: 'Haiti', GY: 'Guyana', SR: 'Suriname', BZ: 'Belize',
+};
 
-// One index row → the compact seed row the globe keeps (see scripts/snapshot-globe.sh).
-function seedRowOf(raw: unknown): SeedRow | null {
-  if (!raw || typeof raw !== 'object') return null;
-  const row = raw as Record<string, unknown>;
-  const id = asString(row.stationuuid);
-  const stream = asString(row.url_resolved) || asString(row.url);
-  const lat = asNumber(row.geo_lat);
-  const lon = asNumber(row.geo_long);
-  if (!id || !/^https:\/\//i.test(stream)) return null;
-  // A live `${…}` in a URL never plays and would smuggle code through string data.
-  if (stream.includes('${') || stream.includes('`')) return null;
-  if (lat === 0 && lon === 0) return null;
-  if (asNumber(row.hls) !== 0) return null;
-  if (PLAYLIST.test(stream)) return null;
-  const favicon = asString(row.favicon);
-  const codec = asString(row.codec).toUpperCase();
-  const tag = asString(row.tags).split(',')[0].trim();
-  return [
-    id,
-    cleanName(asString(row.name), hostOf(stream)).slice(0, 64),
-    stream.slice(0, 180),
-    Math.round(lat * 1000) / 1000,
-    Math.round(lon * 1000) / 1000,
-    /^https:\/\//i.test(favicon) ? favicon.slice(0, 120) : '',
-    codec === 'UNKNOWN' ? '' : codec.slice(0, 8),
-    asNumber(row.bitrate),
-    asString(row.countrycode).slice(0, 2),
-    tag.slice(0, 24),
-    asNumber(row.votes),
-  ];
-}
+// (countrycode|genre) → stations not yet drawn this session.
+const pools = new Map<string, Station[]>();
 
-async function fetchGlobe(rev: number, storage: Storage): Promise<{ rev: number; count: number; origin: string }> {
-  globeLoading = true;
-  try {
-    const rows: SeedRow[] = [];
-    const seen = new Set<string>();
-    for (let offset = 0; offset < 12000; offset += 4000) {
-      const raw = await getJson(
-        `/json/stations/search?${qs({ hidebroken: 'true', is_https: 'true', has_geo_info: 'true', order: 'votes', reverse: 'true', limit: 4000, offset })}`,
-      );
-      if (!Array.isArray(raw)) break;
-      for (const item of raw) {
-        const row = seedRowOf(item);
-        if (row && !seen.has(row[0])) {
-          seen.add(row[0]);
-          rows.push(row);
-        }
-      }
-      if (raw.length < 4000) break;
-    }
-    if (rows.length === 0) throw new Error('The station index answered no geo-tagged stations.');
-    globeData = buildDataset(rows, 'net');
-    try {
-      await storage.fs.atomicWriteFile(GLOBE_CACHE, encoder.encode(JSON.stringify(rows)));
-    } catch {
-      // The cache is an optimisation; the session still has the fresh set.
-    }
-    return { rev, count: rows.length, origin: 'net' };
-  } finally {
-    globeLoading = false;
-  }
+function rnd<T>(xs: T[]): T | undefined {
+  if (xs.length === 0) return undefined;
+  const buf = new Uint32Array(1);
+  crypto.getRandomValues(buf); // ambient-free draw: crypto is allowed inside a source
+  return xs[buf[0] % xs.length];
 }
 
 function hostOf(url: string): string {
@@ -276,27 +244,6 @@ const SHORT_COUNTRY: Record<string, string> = {
   'Türkiye': 'Türkiye',
 };
 
-const SHORT_LANG: Record<string, string> = {
-  english: '英语',
-  german: '德语',
-  french: '法语',
-  spanish: '西班牙语',
-  italian: '意大利语',
-  russian: '俄语',
-  chinese: '中文',
-  japanese: '日语',
-  portuguese: '葡萄牙语',
-  dutch: '荷兰语',
-  polish: '波兰语',
-  turkish: '土耳其语',
-};
-
-function titleCase(name: string): string {
-  const known = SHORT_LANG[name.toLowerCase()];
-  if (known) return known;
-  return name.charAt(0).toUpperCase() + name.slice(1);
-}
-
 function shortCountry(country: string): string {
   return SHORT_COUNTRY[country] ?? country.replace(/^The\s+/i, '');
 }
@@ -324,21 +271,24 @@ function normalize(raw: unknown): Station | null {
   const tags = asString(row.tags)
     .split(',')
     .map((tag) => tag.trim())
-    .filter((tag) => tag.length > 0)
+    .filter((tag) => tag.length > 0 && tag.length < 18)
     .slice(0, 6);
   const country = shortCountry(asString(row.country));
   const codecRaw = asString(row.codec).toUpperCase();
   const codec = codecRaw === 'UNKNOWN' ? '' : codecRaw;
   const bitrate = asNumber(row.bitrate);
+  const cc = asString(row.countrycode).toUpperCase().slice(0, 2);
   return {
     id,
     name: cleanName(asString(row.name), hostOf(stream)),
-    tagline: [country, tags.slice(0, 2).join(' · ')].filter((part) => part.length > 0).join(' · '),
+    tagline: [CC_ZH[cc] ?? country, tags.slice(0, 2).join(' · ')].filter((part) => part.length > 0).join(' · '),
     stream,
     fallback: fallbackFor(asString(row.url), stream),
     favicon: /^https:\/\//i.test(favicon) ? favicon : '',
-    country,
-    countryCode: asString(row.countrycode),
+    country: CC_ZH[cc] ?? country,
+    countryEn: country || cc,
+    countryCode: cc,
+    flag: flagOf(cc),
     tags,
     codec,
     bitrate: bitrate > 0 ? Math.round(bitrate) : 0,
@@ -387,22 +337,23 @@ async function readJson<T>(storage: Storage, path: string, keep: (value: unknown
   }
 }
 
-function readStrings(storage: Storage, path: string): Promise<string[]> {
-  return readJson(storage, path, (v) => (typeof v === 'string' && v.trim() !== '' ? v : null));
+// Old saves may predate a field; everything is repaired on read.
+function repairStation(v: Station & Record<string, unknown>): Station {
+  return {
+    ...v,
+    frequency: Number.isFinite(v.frequency) && (v.frequency as number) > 0 ? (v.frequency as number) : freqOf(v.id),
+    lat: Number.isFinite(v.lat) ? (v.lat as number) : 0,
+    lon: Number.isFinite(v.lon) ? (v.lon as number) : 0,
+    fallback: typeof v.fallback === 'string' ? v.fallback : '',
+    countryCode: typeof v.countryCode === 'string' ? v.countryCode.slice(0, 2) : '',
+    flag: flagOf(typeof v.countryCode === 'string' ? v.countryCode.slice(0, 2) : ''),
+    tagline: typeof v.tagline === 'string' ? v.tagline : (v.country as string) || '',
+    tags: Array.isArray(v.tags) ? (v.tags as unknown[]).filter((t): t is string => typeof t === 'string') : [],
+  };
 }
 
-// Old saves may predate a field; everything is repaired on read.
 function readStations(storage: Storage, path: string): Promise<Station[]> {
-  return readJson(storage, path, (v) => {
-    if (!isStation(v)) return null;
-    return {
-      ...v,
-      frequency: Number.isFinite(v.frequency) ? v.frequency : freqOf(v.id),
-      lat: Number.isFinite(v.lat) ? v.lat : 0,
-      lon: Number.isFinite(v.lon) ? v.lon : 0,
-      fallback: typeof v.fallback === 'string' ? v.fallback : '',
-    };
-  });
+  return readJson(storage, path, (v) => (isStation(v) ? repairStation(v as Station & Record<string, unknown>) : null));
 }
 
 async function writeJson(storage: Storage, path: string, value: unknown): Promise<void> {
@@ -414,68 +365,6 @@ async function writeJson(storage: Storage, path: string, value: unknown): Promis
   }
 }
 
-// One feed per (kind, value, query): the view asks for `want` rows and gets the accumulated
-// list back, so a scroll only fetches what is missing. The index pages with raw offsets, which
-// drift once duplicates are dropped, so the raw count is kept beside the kept rows.
-type Feed = { items: Station[]; raw: number; done: boolean };
-const feeds = new Map<string, Feed>();
-// Session-scoped LRU: revisits serve from cache so tab switches stay instant, and the
-// cap keeps a long browsing session from hoarding every tag/country/search it touched.
-const FEED_LIMIT = 12;
-
-async function pageOf(
-  kind: string,
-  value: string,
-  query: string,
-  offset: number,
-  lang: string,
-  codec: string,
-): Promise<{ rows: Station[]; raw: number }> {
-  const filters: Record<string, string | number> = { ...FILTERS, limit: PAGE, offset };
-  if (kind === 'tag') filters.tagExact = value;
-  else if (kind === 'country') filters.countrycode = value;
-  else if (kind === 'search') filters.name = query;
-  if (lang !== '') filters.language = lang;
-  if (codec !== '') filters.codec = codec;
-  const raw = await getJson(`/json/stations/search?${qs(filters)}`);
-  return { rows: toStations(raw), raw: Array.isArray(raw) ? raw.length : 0 };
-}
-
-async function feed(
-  kind: string,
-  value: string,
-  query: string,
-  want: number,
-  lang = '',
-  codec = '',
-): Promise<Station[]> {
-  const key = `${kind}|${value}|${query}|${lang}|${codec}`;
-  let f = feeds.get(key);
-  if (!f) {
-    f = { items: [], raw: 0, done: false };
-    if (feeds.size >= FEED_LIMIT) {
-      // Map keeps insertion order, so the first key is the least recently created feed.
-      const oldest = feeds.keys().next().value as string;
-      feeds.delete(oldest);
-    }
-    feeds.set(key, f);
-  }
-  while (f.items.length < want && !f.done) {
-    const page = await pageOf(kind, value, query, f.raw, lang, codec);
-    f.raw += page.raw;
-    const seen = new Set(f.items.map((s) => s.id));
-    for (const station of page.rows) {
-      if (!seen.has(station.id)) {
-        f.items.push(station);
-        seen.add(station.id);
-      }
-    }
-    // The index answers a short page at the end; the rows it dropped are not the end.
-    if (page.raw < PAGE) f.done = true;
-  }
-  return f.items.slice(0, want);
-}
-
 // The index counts a play per station per IP per day; it is the only feedback it asks for.
 function reportClick(id: string): void {
   fetch(`${base}/json/url/${encodeURIComponent(id)}`, {
@@ -484,145 +373,147 @@ function reportClick(id: string): void {
   }).catch(() => undefined);
 }
 
-const sources: Sources = {
-  // rev 1 reads what the app already has (cache → seed → nothing); rev > 1 fetches.
-  globeLoad: async ([rev]: [number], _store, storage): Promise<{ rev: number; count: number; origin: string }> =>
-    rev <= 1 ? bootGlobe(storage) : fetchGlobe(rev, storage),
+function agoParts(t: number, now: number): { kind: string; n: number } {
+  const minutes = Math.floor((now - t) / 60000);
+  if (minutes < 1) return { kind: 'now', n: 0 };
+  if (minutes < 60) return { kind: 'min', n: minutes };
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return { kind: 'hour', n: hours };
+  return { kind: 'day', n: Math.floor(hours / 24) };
+}
 
-  // The pins a camera at (lat, lon, zoom) should see. The map view owns pan and
-  // zoom now, so this only runs when the camera settles: pick the stations with
-  // the most votes inside the visible band, capped so the web never has to push
-  // thousands of DOM pins. Fewer than a handful in view → widen to nearest-by-
-  // distance so remote areas are still marked.
-  mapPins: async ([lat, lon, zoom, _rev]: [number, number, number, number]): Promise<
-    { id: string; latitude: number; longitude: number; title: string | null }[]
-  > => {
-    if (!globeData) return [];
-    const { rows, lats, lons } = globeData;
-    const radiusKm = 66000 / Math.pow(2, zoom);
-    const cap = zoom <= 2 ? 250 : zoom <= 4 ? 400 : 600;
-    const idx: number[] = [];
-    for (let i = 0; i < rows.length; i += 1) {
-      if (haversine(lat, lon, lats[i], lons[i]) <= radiusKm) idx.push(i);
-    }
-    if (idx.length > cap) {
-      // votes are the index's own popularity ranking — keep the loudest ones
-      idx.sort((a, b) => asNumber(rows[b][10]) - asNumber(rows[a][10]));
-      idx.length = cap;
-    } else if (idx.length < 40) {
-      const near = nearestIn(globeData, lat, lon, 40);
-      const seen = new Set(idx);
-      for (const { row } of near) {
-        const j = rows.indexOf(row);
-        if (j >= 0 && !seen.has(j)) { seen.add(j); idx.push(j); }
+// Rough local clock at a longitude: one hour per 15°, rounded to the nearest
+// zone, spoken the way the prototype does ("当地约 下午 7:24"). `now` comes from
+// the view's exactTime resource — sources have no ambient clock.
+function localTimeParts(lon: number, now: number): { part: string; time: string } | null {
+  if (!Number.isFinite(lon)) return null;
+  const shifted = new Date(now + Math.round(lon / 15) * 3600000);
+  const h = shifted.getUTCHours();
+  const mm = String(shifted.getUTCMinutes()).padStart(2, '0');
+  const part = h < 5 ? 'dawn' : h < 12 ? 'morning' : h < 13 ? 'noon' : h < 18 ? 'afternoon' : 'evening';
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return { part, time: `${h12}:${mm}` };
+}
+
+// Localize a station's place strings at read time (favorites/history were saved
+// with the base-locale names baked in; `countryEn` keeps the raw English name).
+function localizeStation(s: Station, zh: boolean): Station {
+  const zhName = CC_ZH[s.countryCode] ?? s.country;
+  const enName = s.countryEn || CC_EN[s.countryCode] || s.country;
+  const name = zh ? zhName : enName;
+  return {
+    ...s,
+    country: name,
+    tagline: [name, s.tags.slice(0, 2).join(' · ')].filter((p) => p.length > 0).join(' · '),
+  };
+}
+
+const sources: Sources = {
+  // The radio face's SHUFFLE: up to three attempts, each jumping to a random
+  // country inside the region choice (any country when none), drawing one not-yet-
+  // played station from a session pool — the prototype's pickLive, against the
+  // real index. An empty answer means "the index answered nothing usable".
+  shuffleStation: async ([rev, regionKeys, genreKey, exclude, zh]: [
+    number,
+    string[],
+    string,
+    string,
+    boolean,
+  ]): Promise<{ rev: number; station: Station }[]> => {
+    const codes = regionKeys.flatMap((k) => REGIONS[k] ?? []);
+    const codeSet = new Set(codes);
+    const tag = GENRE_TAG[genreKey] ?? '';
+    const fetchRows = async (cc: string): Promise<Station[]> => {
+      const filters: Record<string, string | number> = {
+        hidebroken: 'true',
+        is_https: 'true',
+        order: 'random',
+        limit: cc ? 30 : 80,
+      };
+      if (cc) filters.countrycode = cc;
+      if (tag) filters.tag = tag;
+      return toStations(await getJson(`/json/stations/search?${qs(filters)}`));
+    };
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const cc = codes.length ? (rnd(codes) ?? '') : '';
+      const key = `${cc}|${tag}`;
+      let pool = pools.get(key);
+      if (!pool || pool.length === 0) {
+        pool = await fetchRows(cc);
+      }
+      pool = pool.filter((s) => s.id !== exclude);
+      const pick = rnd(pool);
+      if (pick) {
+        pools.set(key, pool.filter((s) => s.id !== pick.id));
+        return [{ rev, station: localizeStation(pick, zh) }];
       }
     }
-    return idx.map((i) => {
-      const r = rows[i];
-      return {
-        id: r[0],
-        latitude: asNumber(r[3]),
-        longitude: asNumber(r[4]),
-        // names travel with every pin: the map hides them until a pin is selected
-        title: r[1],
-      };
-    });
-  },
-
-  // A tapped pin, hydrated into a playable Station straight from the dataset —
-  // distance measured from the live camera so the row reads naturally.
-  stationById: async ([id, camLat, camLon]: [string, number, number]): Promise<Station> => {
-    if (!globeData) return emptyStation();
-    const row = globeData.rows.find((r) => r[0] == id);
-    if (!row) return emptyStation();
-    return {
-      id: row[0],
-      name: row[1],
-      tagline: [row[8], row[9]].filter(Boolean).join(' · '),
-      stream: row[2],
-      fallback: '',
-      favicon: row[5],
-      country: row[8],
-      countryCode: row[8],
-      tags: row[9] ? [row[9]] : [],
-      codec: row[6],
-      bitrate: asNumber(row[7]),
-      votes: asNumber(row[10]),
-      clicks: 0,
-      frequency: freqOf(row[0]),
-      lat: asNumber(row[3]),
-      lon: asNumber(row[4]),
-      distanceKm: Math.round(haversine(camLat, camLon, asNumber(row[3]), asNumber(row[4])) * 10) / 10,
-    };
-  },
-
-  feed: async ([kind, value, query, want, lang, codec]: [
-    string,
-    string,
-    string,
-    number,
-    string,
-    string,
-  ]): Promise<Station[]> => {
-    if (kind === 'search' && query.trim() === '') return [];
-    return feed(kind, value, kind === 'search' ? query.trim() : '', Math.max(PAGE, want), lang ?? '', codec ?? '');
-  },
-
-  // The languages the index actually carries, biggest first: the search screen's filter row.
-  languages: async (): Promise<{ code: string; name: string }[]> => {
-    try {
-      const raw = await getJson('/json/languages');
-      if (!Array.isArray(raw)) return [];
-      const rows = raw as { name: string; stationcount: number }[];
-      return rows
-        .filter((r) => typeof r.name === 'string' && r.name.trim() !== '' && r.stationcount > 0)
-        .sort((a, b) => b.stationcount - a.stationcount)
-        .slice(0, 10)
-        .map((r) => ({ code: r.name.trim(), name: titleCase(r.name.trim()) }));
-    } catch {
+    // The chosen country came up empty for the genre (common for sparse
+    // region+genre pairs). Fall back to a tag-wide sweep filtered to the
+    // region on the client, then to the genre alone — region and genre each
+    // stay as tight as the index actually allows.
+    if (tag) {
+      const wide = (await fetchRows('')).filter((s) => {
+        if (s.id === exclude) return false;
+        return codes.length === 0 || codeSet.has(s.countryCode.toUpperCase());
+      });
+      const pick = rnd(wide);
+      if (pick) return [{ rev, station: localizeStation(pick, zh) }];
       return [];
     }
+    return [];
   },
 
-  // The radio face: a random dial position, never the station already playing.
-  randomStation: async (
-    [rev, exclude, lat, lon, radiusKm]: [number, string, number, number, number],
-  ): Promise<{ rev: number; station: Station }[]> => {
-    const filters: Record<string, string | number> = {
-      hidebroken: 'true',
-      is_https: 'true',
-      // The map flies to the pick, so a station without coordinates is no use here.
-      has_geo_info: 'true',
-      order: 'random',
-      limit: 8,
-    };
-    // "Next" should stay in the neighbourhood the user is looking at, when there is one.
-    if (lat !== 0 || lon !== 0) {
-      filters.geo_lat = lat.toFixed(3);
-      filters.geo_long = lon.toFixed(3);
-      filters.geo_distance = Math.round(Math.max(10, radiusKm) * 1000);
+  // The 足迹 tab: everything the shuffle landed on, folded into counts per
+  // country, plus the recent rows with a dial position and a relative time.
+  footprint: async ([zh, now]: [boolean, number], _store: unknown, storage: Storage): Promise<{
+    countryCount: number;
+    stationCount: number;
+    countries: { cc: string; country: string; count: number; flag: string }[];
+    recent: { station: Station; freq: string; place: string; agoKind: string; agoN: number }[];
+  }> => {
+    // Recent is saved as {station, at} rows so the 足迹 tab can show "5 分钟前".
+    const entries = await readJson(storage, RECENT, (v): { station: Station; at: number } | null => {
+      if (isStation(v)) return { station: repairStation(v as Station & Record<string, unknown>), at: 0 }; // legacy saves: no timestamp kept
+      if (v && typeof v === 'object' && isStation((v as Record<string, unknown>).station)) {
+        const row = v as Record<string, unknown>;
+        return { station: repairStation(row.station as Station & Record<string, unknown>), at: asNumber(row.at) };
+      }
+      return null;
+    });
+    const rows = entries.map((e) => e.station);
+    const counts = new Map<string, { cc: string; country: string; count: number; flag: string }>();
+    for (const s of rows) {
+      const cc = s.countryCode || '??';
+      const shown = localizeStation(s, zh);
+      const entry = counts.get(cc);
+      if (entry) entry.count += 1;
+      else counts.set(cc, { cc, country: shown.country || cc, count: 1, flag: flagOf(cc) });
     }
-    const rows = toStations(await getJson(`/json/stations/search?${qs(filters)}`));
-    const station = rows.find((row) => row.id !== exclude) ?? rows[0];
-    return station ? [{ rev, station }] : [];
+    const countries = [...counts.values()].sort((a, b) => b.count - a.count);
+    return {
+      countryCount: countries.length,
+      stationCount: rows.length,
+      countries,
+      recent: entries.map((e) => {
+        const shown = localizeStation(e.station, zh);
+        const ago = e.at > 0 ? agoParts(e.at, now) : { kind: '', n: 0 };
+        return {
+          station: shown,
+          freq: e.station.frequency.toFixed(1),
+          place: shown.tagline || shown.country,
+          agoKind: ago.kind,
+          agoN: ago.n,
+        };
+      }),
+    };
   },
 
-  searchHistory: async (_args: [], _store: unknown, storage: Storage): Promise<string[]> =>
-    readStrings(storage, SEARCHES),
+  localTime: async ([lon, now]: [number, number]): Promise<{ part: string; time: string }> =>
+    localTimeParts(lon, now) ?? { part: '', time: '' },
 
-  pushSearch: async (
-    [query]: [string],
-    _store: unknown,
-    storage: Storage,
-  ): Promise<{ ok: boolean; favorited: boolean }> => {
-    const kept = await readStrings(storage, SEARCHES);
-    const next = [query, ...kept.filter((q) => q !== query)].slice(0, SEARCH_LIMIT);
-    await writeJson(storage, SEARCHES, next);
-    return { ok: true, favorited: false };
-  },
-
-  loadFavorites: async (_args: [], _store: unknown, storage: Storage): Promise<Station[]> =>
-    readStations(storage, FAVORITES),
+  loadFavorites: async ([zh]: [boolean], _store: unknown, storage: Storage): Promise<Station[]> =>
+    (await readStations(storage, FAVORITES)).map((s) => localizeStation(s, zh)),
 
   toggleFavorite: async (
     [station]: [Station],
@@ -636,20 +527,61 @@ const sources: Sources = {
     return { ok: true, favorited: !exists };
   },
 
-  loadRecent: async (_args: [], _store: unknown, storage: Storage): Promise<Station[]> =>
-    readStations(storage, RECENT),
+  loadRecent: async ([zh]: [boolean], _store: unknown, storage: Storage): Promise<Station[]> => {
+    const entries = await readJson(storage, RECENT, (v): Station | null => {
+      if (isStation(v)) return repairStation(v as Station & Record<string, unknown>);
+      if (v && typeof v === 'object' && isStation((v as Record<string, unknown>).station)) {
+        return (v as Record<string, unknown>).station as Station;
+      }
+      return null;
+    });
+    return entries.map((s) => localizeStation(s, zh));
+  },
 
   pushRecent: async (
-    [station]: [Station],
+    [station, now]: [Station, number],
     _store: unknown,
     storage: Storage,
   ): Promise<{ ok: boolean; favorited: boolean }> => {
-    const kept = await readStations(storage, RECENT);
-    await writeJson(storage, RECENT, [station, ...kept.filter((s) => s.id !== station.id)].slice(0, RECENT_LIMIT));
+    const entries = await readJson(storage, RECENT, (v): { station: Station; at: number } | null => {
+      if (isStation(v)) return { station: v, at: 0 };
+      if (v && typeof v === 'object' && isStation((v as Record<string, unknown>).station)) {
+        const row = v as Record<string, unknown>;
+        return { station: row.station as Station, at: asNumber(row.at) };
+      }
+      return null;
+    });
+    const next = [{ station, at: now }, ...entries.filter((e) => e.station.id !== station.id)].slice(0, RECENT_LIMIT);
+    await writeJson(storage, RECENT, next);
     reportClick(station.id);
     return { ok: true, favorited: false };
   },
 
+  loadPrefs: async (_args: [], _store: unknown, storage: Storage): Promise<{
+    regions: string[];
+    genre: string;
+  }> => {
+    try {
+      const raw: unknown = JSON.parse(decoder.decode(await storage.fs.readFile(PREFS)));
+      if (!raw || typeof raw !== 'object') return { regions: [], genre: '' };
+      const p = raw as Record<string, unknown>;
+      return {
+        regions: Array.isArray(p.regions) ? p.regions.filter((r) => typeof r === 'string') : [],
+        genre: asString(p.genre),
+      };
+    } catch {
+      return { regions: [], genre: '' };
+    }
+  },
+
+  savePrefs: async (
+    [regions, genre]: [string[], string],
+    _store: unknown,
+    storage: Storage,
+  ): Promise<{ ok: boolean; favorited: boolean }> => {
+    await writeJson(storage, PREFS, { regions, genre });
+    return { ok: true, favorited: false };
+  },
 };
 
 export const answer: Answer = (source, args, store, storage, native) =>

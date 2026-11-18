@@ -6,6 +6,5 @@
     "start": "bun exact.mjs serve dist"
   },
   "dependencies": {
-    "@exact/maps": "file:../.extern/exact/packages/maps"
   }
 }

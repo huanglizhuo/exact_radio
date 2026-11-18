@@ -1,0 +1,44 @@
+# Deploys the web build to Cloudflare Pages (airwave-76y.pages.dev).
+# Runs on the Mac self-hosted runner, which shares this machine's
+# toolchain (bun at ~/.bun/bin, node at ~/.local/bin) and the Exact
+# SDK checkout at /Users/lizhuo/owork/e-asr/.extern/exact (gitignored,
+# machine-specific), plus the wrangler login in
+# ~/Library/Preferences/.wrangler (same user as the runner service).
+name: deploy-web
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "airwave/**"
+      - ".github/workflows/deploy-web.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-web
+  cancel-in-progress: true
+
+env:
+  EXACT: /Users/lizhuo/owork/e-asr/.extern/exact
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, macOS]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the web app
+        working-directory: airwave
+        run: |
+          export PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"
+          bun install
+          bun exact.mjs web-build
+
+      - name: Deploy to Cloudflare Pages
+        working-directory: airwave
+        run: |
+          export PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"
+          npx --yes wrangler pages deploy target/web-dist \
+            --project-name airwave \
+            --branch main \
+            --commit-dirty=true

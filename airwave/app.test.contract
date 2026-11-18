@@ -1,119 +1,128 @@
-// Airwave's authored checks. Run with:
+// 漫游电台's authored checks. Run with:
 //   bun exact.mjs test web
 // The station index is a live network service, so these tests assert what the app
-// owns: the tabs, the push routes, the query it commits, and the states before any answer.
+// owns: the tabs, the dial, the filter sheet, favorites, and the states before any
+// answer comes back.
+locale "zh-CN"
 
-test "three tabs switch"
-  clock settle
-  tap "tab-home"
-  expect text "title-home" == "发现"
-  tap "tab-favorites"
-  expect text "title-favorites" == "收藏"
-  tap "tab-radio"
-  expect text "player-idle" == "还没在播"
-
-test "the app opens on the radio tab"
+test "the app opens on the radio tab in standby"
   clock settle
   expect state nav.tab == "radio"
-  expect text "player-idle" == "还没在播"
+  expect text "status-label" == "待机"
+  expect text "now-title" == "世界在等你"
+  expect text "now-sub" == "点下面的大按钮，随便去个地方"
+  expect text "freq-label" == "FM 87.5"
 
-test "the discover page lists the popular stations"
-  clock data
-  tap "tab-home"
-  clock data
-  expect state discoverList.length <= 40
-
-test "a typed query is committed after the pause"
-  tap "open-search"
-  expect state applied == ""
-  type "search-field" "BBC"
-  expect state draft == "BBC"
-  expect state applied == ""
-  clock +600
-  clock data
-  expect state applied == "BBC"
-
-test "clearing the field goes back to the prompt"
-  tap "open-search"
-  type "search-field" "jazz"
-  clock +600
-  clock data
-  expect state applied == "jazz"
-  type "search-field" ""
-  clock +600
-  clock data
-  expect state applied == ""
-
-test "favorites starts empty"
-  tap "tab-favorites"
-  clock data
-  expect state favs == []
-
-test "the player starts at full volume"
-  expect state volume == 1
-
-test "a page holds forty rows and the next one is asked for"
-  clock data
-  expect state want == 40
-  expect state discoverList.length <= 40
-
-test "the radio tab shows the map and asks for a station"
+test "the default filter label is the whole world"
   clock settle
-  tap "tab-radio"
+  tap "open-filter"
+  expect text "sheet-title" == "想去哪儿听？"
+  expect state draftRegions.length == 0
+  expect state draftGenre == "all"
+  tap "apply-sheet"
   clock settle
-  expect text "player-idle" == "还没在播"
-  expect state mapZoom == 2
-  expect state globeData.count >= 1
-  expect state pins.length >= 1
-  expect state tuning == false
-  expect state dialRev == 0
-  tap "player-next"
+  expect state sheetOpen == false
+
+test "picking regions and a genre updates the draft, not the live filter"
+  tap "open-filter"
+  tap "region-asia"
+  tap "region-europe"
+  expect state draftRegions.length == 2
+  expect state regions.length == 0
+  tap "genre-jazz"
+  expect state draftGenre == "jazz"
+  tap "region-all"
+  expect state draftRegions.length == 0
+
+test "applying the sheet saves prefs and starts tuning"
+  tap "open-filter"
+  tap "region-asia"
+  tap "genre-jazz"
+  tap "apply-sheet"
+  clock settle
+  expect state sheetOpen == false
+  expect state regions.length == 1
+  expect state genre == "jazz"
   expect state tuning == true
   expect state dialRev == 1
 
-test "the settled map no longer auto-plays; the hint invites pin taps"
+test "tuning jitters the needle then lands"
+  tap "shuffle"
+  expect state tuning == true
+  expect state dialRev == 1
+  expect text "status-label" == "调频中…"
+  expect text "now-title" == "调频中…"
+  clock +1400
   clock settle
-  tap "tab-radio"
-  clock settle
-  clock +1500
-  expect text "player-idle" == "还没在播"
-  expect text "radio-hint" == "点图钉播放电台"
+  expect state tuning == false
 
-test "the search screen offers language and codec menus"
-  tap "open-search"
-  expect state lang == ""
-  expect state codec == ""
-  tap "codec-filter"
-  tap "codec-MP3"
-  expect state codec == "MP3"
-  tap "lang-filter"
-  tap "lang-all"
-  expect state lang == ""
-  tap "clear-filters"
-  expect state codec == ""
+test "the filter label reflects a chosen genre"
+  clock settle
+  tap "open-filter"
+  tap "genre-pop"
+  tap "apply-sheet"
+  clock +1400
+  clock settle
+  tap "open-filter"
+  expect text "filter-label" == "全世界 · 流行"
+  tap "apply-sheet"
+  clock settle
 
-test "the now-playing surface is a route, not an overlay"
+test "the radio face keeps the dial between the band ends"
   clock settle
-  tap "tab-home"
-  clock data
-  tap "station-b1201e74-2979-44d8-866e-02f74347a8d0"
-  clock data
-  tap "player-open"
-  clock settle
-  expect text "player-collapse" == "收起"
-  tap "player-collapse"
-  clock settle
-  expect text "title-home" == "发现"
+  expect state curFreq >= 87.5
+  expect state curFreq <= 107.5
 
-test "muting remembers the volume it left"
-  clock settle
-  tap "tab-home"
+test "favorites starts empty with its dashed prompt"
+  tap "tab-favorites"
   clock data
-  tap "station-b1201e74-2979-44d8-866e-02f74347a8d0"
+  expect state favs == []
+  expect text "title-favorites" == "收藏"
+  expect text "favs-empty" == "♡还没有收藏遇到喜欢的台，点一下收音机旁的爱心，它就会住进这里。去随便听听"
+
+test "the favorites empty state goes back to the radio"
+  tap "tab-favorites"
+  tap "empty-go-radio"
+  expect state nav.tab == "radio"
+
+test "the footprint tab reports zeros on a fresh app"
+  tap "tab-history"
   clock data
-  tap "player-open"
+  expect text "title-history" == "足迹"
+  expect state foot.countryCount == 0
+  expect state foot.stationCount == 0
+  expect text "foot-empty" == "还没有足迹。随机听过的每台电台都会记在这里。"
+
+test "the tab bar carries the three screens"
   clock settle
-  tap "panel-mute"
-  expect state volume == 0
-  tap "panel-mute"
-  expect state volume == 1
+  expect text "tab-radio" == "收音机"
+  expect text "tab-favorites" == "收藏"
+  expect text "tab-history" == "足迹"
+
+test "favorites toast when saved"
+  clock settle
+  tap "fav-button"
+  clock data
+  expect state toastOn == true
+  clock +2600
+  expect state toastOn == false
+
+test "dismissing the sheet keeps the chosen filters"
+  clock settle
+  clock data
+  tap "open-filter"
+  clock settle
+  tap "region-asia"
+  tap "genre-jazz"
+  tap "sheet-scrim-top"
+  clock settle
+  clock data
+  expect state sheetOpen == false
+  expect state regions.length == 1
+  expect state genre == "jazz"
+  clock +2600
+  tap "open-filter"
+  clock settle
+  clock data
+  expect state draftRegions.length == 1
+  expect state draftGenre == "jazz"
