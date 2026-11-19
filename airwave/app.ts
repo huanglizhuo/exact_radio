@@ -93,9 +93,10 @@ function qs(params: Record<string, string | number>): string {
 
 let base = PRIMARY;
 
-async function getJson(path: string): Promise<unknown> {
+async function getJson(path: string, timeoutMs = 16000): Promise<unknown> {
+  // timeoutMs is the whole call's budget: each server attempt gets half.
   const attempt = async (b: string): Promise<Response> =>
-    fetch(`${b}${path}`, { headers: { 'user-agent': UA }, exactTimeout: 8000 });
+    fetch(`${b}${path}`, { headers: { 'user-agent': UA }, exactTimeout: Math.ceil(timeoutMs / 2) });
   let response: Response;
   try {
     response = await attempt(base);
@@ -210,13 +211,49 @@ function hostOf(url: string): string {
 
 // Names arrive with padding, with the genre glued on (`0R - Piano Lounge || Jazz,Piano`),
 // and sometimes empty — the index is crowd-sourced.
+// One rendered line's worth of station name: CJK glyphs draw about twice an
+// ASCII letter, so the budget is columns, not characters — 48 columns is
+// 24 hanzi or 48 ASCII letters (the old 72-character cut let Chinese names
+// run three times past the dial's one-line width).
+const NAME_WIDTH = 48;
+
+// Ranges that render wide (double-width) in the UI font: Hangul Jamo, CJK
+// radicals through Yi, Hangul syllables, CJK compatibility ideographs and
+// forms, fullwidth punctuation/letters, and the supplementary planes.
+function isWideCodePoint(cp: number): boolean {
+  return (
+    (cp >= 0x1100 && cp <= 0x115f) ||
+    (cp >= 0x2e80 && cp <= 0xa4cf) ||
+    (cp >= 0xa960 && cp <= 0xa97f) ||
+    (cp >= 0xac00 && cp <= 0xd7a3) ||
+    (cp >= 0xf900 && cp <= 0xfaff) ||
+    (cp >= 0xfe30 && cp <= 0xfe4f) ||
+    (cp >= 0xff00 && cp <= 0xff60) ||
+    (cp >= 0xffe0 && cp <= 0xffe6) ||
+    (cp >= 0x20000 && cp <= 0x3fffd)
+  );
+}
+
 function cleanName(raw: string, fallback: string): string {
   let name = raw.trim();
   const bar = name.indexOf('||');
   if (bar > 0) name = name.slice(0, bar);
   name = name.replace(/\s+/g, ' ').trim();
   if (!name) name = fallback || 'Radio station';
-  return name.length > 72 ? `${name.slice(0, 71).trimEnd()}…` : name;
+  let width = 0;
+  for (const ch of name) width += isWideCodePoint(ch.codePointAt(0)!) ? 2 : 1;
+  if (width <= NAME_WIDTH) return name;
+  // Over budget: keep the widest prefix that still leaves a column for "…".
+  // `for…of` walks by code point, so an emoji astral pair is never cut in half.
+  let kept = 0;
+  let keptWidth = 0;
+  for (const ch of name) {
+    const w = isWideCodePoint(ch.codePointAt(0)!) ? 2 : 1;
+    if (keptWidth + w > NAME_WIDTH - 1) break;
+    keptWidth += w;
+    kept += ch.length;
+  }
+  return `${name.slice(0, kept).trimEnd()}…`;
 }
 
 // The index spells countries out ("The United Kingdom Of Great Britain And Northern Ireland");
@@ -385,6 +422,11 @@ function agoParts(t: number, now: number): { kind: string; n: number } {
 // Rough local clock at a longitude: one hour per 15°, rounded to the nearest
 // zone, spoken the way the prototype does ("当地约 下午 7:24"). `now` comes from
 // the view's exactTime resource — sources have no ambient clock.
+// Day-part buckets, exactly the five the view's chip chain renders
+// (app.contract: dawn/morning/noon/afternoon/evening — a `night` part would
+// fall through to evening there, so late hours deliberately stay `evening`):
+//   0:00–4:59 dawn (凌晨)   5:00–11:59 morning   12:00–12:59 noon
+//   13:00–17:59 afternoon  18:00–23:59 evening (晚上, incl. 21:00+ night)
 function localTimeParts(lon: number, now: number): { part: string; time: string } | null {
   if (!Number.isFinite(lon)) return null;
   const shifted = new Date(now + Math.round(lon / 15) * 3600000);
@@ -409,21 +451,40 @@ function localizeStation(s: Station, zh: boolean): Station {
 }
 
 const sources: Sources = {
-  // The radio face's SHUFFLE: up to three attempts, each jumping to a random
-  // country inside the region choice (any country when none), drawing one not-yet-
-  // played station from a session pool — the prototype's pickLive, against the
-  // real index. An empty answer means "the index answered nothing usable".
+  // The radio face's SHUFFLE. Each sweep carries a total time budget (the
+  // index can take two 8-second timeouts per call, and a sweep makes several
+  // calls — without a budget the dial can hang a minute on a weak network);
+  // when the money runs out the answer says "offline" so the face can offer a
+  // retry instead of a false "nothing here". The ladder stays as tight as the
+  // index allows: region+genre draws, a genre-wide sweep clipped to the
+  // region, then — only if the genre was the blocker — region-only draws,
+  // marked "relaxed" so the face can say what it dropped.
   shuffleStation: async ([rev, regionKeys, genreKey, exclude, zh]: [
     number,
     string[],
     string,
     string,
     boolean,
-  ]): Promise<{ rev: number; station: Station }[]> => {
+  ]): Promise<{ rev: number; station: Station | null; note: string }[]> => {
     const codes = regionKeys.flatMap((k) => REGIONS[k] ?? []);
     const codeSet = new Set(codes);
     const tag = GENRE_TAG[genreKey] ?? '';
-    const fetchRows = async (cc: string): Promise<Station[]> => {
+    // No clock is readable inside a source, so the budget is a call count
+    // with decaying timeouts: four directory calls at most, 6s, 4s, 3s, 2s
+    // (each call's budget split across its two servers). A weak network
+    // starves the sweep in ~15s instead of the minute two full timeouts per
+    // call could hang it, and a starved sweep answers "offline" so the face
+    // offers a retry instead of a false "nothing here". Cached pools cost no
+    // budget. The ladder stays as tight as the index allows: region+genre
+    // draws, a genre-wide sweep clipped to the region, then — only if the
+    // genre was the blocker — region-only draws, marked "relaxed" so the face
+    // can say what it dropped.
+    const TIMEOUTS = [6000, 4000, 3000, 2000];
+    let call = 0;
+    const canFetch = () => call < TIMEOUTS.length;
+    const fetchRows = async (cc: string, withTag: boolean): Promise<Station[]> => {
+      const t = TIMEOUTS[Math.min(call, TIMEOUTS.length - 1)];
+      call += 1;
       const filters: Record<string, string | number> = {
         hidebroken: 'true',
         is_https: 'true',
@@ -431,37 +492,55 @@ const sources: Sources = {
         limit: cc ? 30 : 80,
       };
       if (cc) filters.countrycode = cc;
-      if (tag) filters.tag = tag;
-      return toStations(await getJson(`/json/stations/search?${qs(filters)}`));
+      if (tag && withTag) filters.tag = tag;
+      return toStations(await getJson(`/json/stations/search?${qs(filters)}`, t));
     };
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const cc = codes.length ? (rnd(codes) ?? '') : '';
-      const key = `${cc}|${tag}`;
-      let pool = pools.get(key);
-      if (!pool || pool.length === 0) {
-        pool = await fetchRows(cc);
+    // Up to three draws from a random country in the region (any country when
+    // none), preferring stations not yet played this session.
+    const drawFromRegion = async (withTag: boolean): Promise<Station | null> => {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        if (!canFetch()) return null;
+        const cc = codes.length ? (rnd(codes) ?? '') : '';
+        const key = `${cc}|${withTag ? tag : ''}`;
+        let pool = pools.get(key);
+        if (!pool || pool.length === 0) {
+          pool = await fetchRows(cc, withTag);
+        }
+        pool = pool.filter((s) => s.id !== exclude);
+        const pick = rnd(pool);
+        if (pick) {
+          pools.set(key, pool.filter((s) => s.id !== pick.id));
+          return pick;
+        }
       }
-      pool = pool.filter((s) => s.id !== exclude);
-      const pick = rnd(pool);
-      if (pick) {
-        pools.set(key, pool.filter((s) => s.id !== pick.id));
-        return [{ rev, station: localizeStation(pick, zh) }];
+      return null;
+    };
+    try {
+      const pick = await drawFromRegion(true);
+      if (pick) return [{ rev, station: localizeStation(pick, zh), note: 'ok' }];
+      if (tag && canFetch()) {
+        // The chosen countries came up empty for the genre (common for sparse
+        // region+genre pairs): one genre-wide sweep, clipped to the region.
+        const wide = (await fetchRows('', true)).filter((s) => {
+          if (s.id === exclude) return false;
+          return codes.length === 0 || codeSet.has(s.countryCode.toUpperCase());
+        });
+        const widePick = rnd(wide);
+        if (widePick) return [{ rev, station: localizeStation(widePick, zh), note: 'ok' }];
       }
+      if (tag) {
+        // Genre was the blocker: play the region without it, and say so.
+        const loose = await drawFromRegion(false);
+        if (loose) return [{ rev, station: localizeStation(loose, zh), note: 'relaxed' }];
+      }
+      // Reached the bottom with budget to spare: the index truly answered
+      // nothing. Out of budget: that is the network, not the music.
+      return [{ rev, station: null, note: canFetch() ? 'empty' : 'offline' }];
+    } catch {
+      // The directory was unreachable or a call threw — not "nothing here".
+      // The face offers a retry instead of shrugging.
+      return [{ rev, station: null, note: 'offline' }];
     }
-    // The chosen country came up empty for the genre (common for sparse
-    // region+genre pairs). Fall back to a tag-wide sweep filtered to the
-    // region on the client, then to the genre alone — region and genre each
-    // stay as tight as the index actually allows.
-    if (tag) {
-      const wide = (await fetchRows('')).filter((s) => {
-        if (s.id === exclude) return false;
-        return codes.length === 0 || codeSet.has(s.countryCode.toUpperCase());
-      });
-      const pick = rnd(wide);
-      if (pick) return [{ rev, station: localizeStation(pick, zh) }];
-      return [];
-    }
-    return [];
   },
 
   // The 足迹 tab: everything the shuffle landed on, folded into counts per

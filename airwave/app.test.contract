@@ -55,6 +55,11 @@ test "tuning jitters the needle then lands"
   clock +1400
   clock settle
   expect state tuning == false
+  // The unreachable directory answer is an actionable toast; let it lapse so
+  // the screen this test ends on is clean.
+  clock +8000
+  clock settle
+  expect state toastOn == false
 
 test "the filter label reflects a chosen genre"
   clock settle
@@ -126,3 +131,138 @@ test "dismissing the sheet keeps the chosen filters"
   clock data
   expect state draftRegions.length == 1
   expect state draftGenre == "jazz"
+
+// cleanName truncates by rendered width, not characters: the station index is
+// pinned with `answer fetch` so the shuffle lands on a known name.
+test "a long CJK station name truncates to the dial's width"
+  answer fetch "https://de1.api.radio-browser.info" with 200 [{"stationuuid":"cjk-width-1","name":"早早早早早早早早早早早早早早早早早早早早早早早早早早早早早早早早早早早早早早早早 || Jazz,Piano","url_resolved":"https://example.org/cjk","url":"https://example.org/cjk","hls":0,"countrycode":"JP","country":"Japan","codec":"MP3","bitrate":128,"votes":1,"clickcount":1,"tags":"jazz"}]
+  clock settle
+  tap "shuffle"
+  clock +1400
+  clock settle
+  expect state tuning == false
+  expect text "now-title" == "早早早早早早早早早早早早早早早早早早早早早早早…"
+  // The pinned name is a worst-case-width fixture; end off the radio face so
+  // the resting screen is not the oversized string.
+  tap "tab-favorites"
+  clock data
+
+test "a long ASCII station name also cuts at the width budget"
+  answer fetch "https://de1.api.radio-browser.info" with 200 [{"stationuuid":"ascii-width-1","name":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","url_resolved":"https://example.org/ascii","url":"https://example.org/ascii","hls":0,"countrycode":"US","country":"United States","codec":"MP3","bitrate":128,"votes":1,"clickcount":1,"tags":"rock"}]
+  clock settle
+  tap "shuffle"
+  clock +1400
+  clock settle
+  expect state tuning == false
+  expect text "now-title" == "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA…"
+  tap "tab-favorites"
+  clock data
+
+// A sweep that cannot reach the directory must offer a retry, not hang on
+// 「调频中」 or claim the world ran out of stations.
+test "an unreachable directory offers a tap-to-retry toast"
+  fail fetch "https://de1.api.radio-browser.info"
+  fail fetch "https://all.api.radio-browser.info"
+  clock settle
+  tap "shuffle"
+  clock +1400
+  clock settle
+  expect state tuning == false
+  expect state toastAct == "retune"
+  expect text "toast" == "连不上电台目录，稍后再试点一下重试"
+  tap "toast-act"
+  expect state tuning == true
+  expect state dialRev == 2
+  clock +1400
+  clock settle
+  expect state toastAct == "retune"
+  clock +8000
+  clock settle
+  expect state toastOn == false
+
+test "an empty answer says so instead of shrugging"
+  answer fetch "https://de1.api.radio-browser.info" with 200 []
+  clock settle
+  tap "shuffle"
+  clock +1400
+  clock settle
+  expect state tuning == false
+  expect state hasCurrent == false
+  expect state toastAct == ""
+  expect text "toast" == "这个筛选下暂时没有台在播"
+  clock +2600
+  clock settle
+
+test "cancel drops the sheet's draft without committing it"
+  clock settle
+  tap "open-filter"
+  clock settle
+  expect focused "region-all"
+  tap "region-asia"
+  tap "genre-jazz"
+  tap "sheet-cancel"
+  clock settle
+  expect state sheetOpen == false
+  expect state regions.length == 0
+  expect state genre == "all"
+  expect focused "open-filter"
+  tap "open-filter"
+  clock settle
+  expect state draftRegions.length == 0
+  expect state draftGenre == "all"
+  tap "sheet-cancel"
+  clock settle
+
+test "Escape closes the sheet without committing" on web
+  clock settle
+  tap "open-filter"
+  clock settle
+  tap "region-europe"
+  type "app" key "Escape"
+  clock settle
+  expect state sheetOpen == false
+  expect state regions.length == 0
+  expect focused "open-filter"
+
+test "Tab cycles the sheet's controls" on web
+  clock settle
+  tap "open-filter"
+  clock settle
+  type "app" key "Tab"
+  clock settle
+  expect focused "region-asia"
+  type "app" key "Tab"
+  clock settle
+  expect focused "region-europe"
+  tap "sheet-cancel"
+  clock settle
+
+test "the system media controls skip to the next station" on web
+  answer fetch "https://de1.api.radio-browser.info" with 200 [{"stationuuid":"ms-1","name":"One","url_resolved":"https://example.org/a","url":"https://example.org/a","hls":0,"countrycode":"JP","country":"Japan","codec":"MP3","bitrate":128,"votes":1,"clickcount":1,"tags":"jazz"}]
+  clock settle
+  tap "shuffle"
+  clock +1400
+  clock settle
+  expect state hasCurrent == true
+  expect mediasession owner == "player"
+  expect mediasession has "nexttrack"
+  tap "player" mediasession "nexttrack"
+  expect state tuning == true
+  expect state dialRev == 2
+  clock settle
+  clock +8000
+  clock settle
+  tap "tab-favorites"
+  clock data
+
+test "the space bar toggles without a focused button" on web
+  clock settle
+  type "app" key " "
+  expect state tuning == true
+  clock settle
+  type "app" key " "
+  expect state dialRev == 2
+  clock settle
+  clock +8000
+  clock settle
+  expect state toastOn == false

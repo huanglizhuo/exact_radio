@@ -26,7 +26,9 @@ shape Station
 
 shape DialPick
   rev: number
-  station: Station
+  // none = the sweep came back without a station to land on; note says why.
+  station: option<Station>
+  note: string
 
 shape CountryCount
   cc: string
@@ -59,6 +61,9 @@ shape Reply
   ok: bool
   favorited: bool
 
+shape Media
+  prefersReducedMotion: bool
+
 shape Time
   epochAtZero: number
   utcOffset: number
@@ -72,6 +77,28 @@ routes nav
 keyframes pulse
   from opacity=0.45
   to opacity=1
+
+// Entrances / exits (toast, sheet, tabs, icon swaps)
+keyframes toastIn
+  from opacity=0 translate="0px 10px"
+keyframes toastOut
+  to opacity=0 translate="0px -8px"
+keyframes scrimIn
+  from opacity=0
+keyframes scrimOut
+  to opacity=0
+keyframes sheetUp
+  from translate="0px 100%"
+keyframes sheetDown
+  to translate="0px 100%"
+keyframes panelIn
+  from opacity=0 translate="0px 10px"
+keyframes iconIn
+  from opacity=0 scale=0.72
+keyframes heartOn
+  from opacity=0.35 scale=0.6
+keyframes heartOff
+  from opacity=0.35 scale=0.6
 
 fn saved(xs: Station[], id: string): bool =
   xs.filter(x => x.id == id).length > 0
@@ -126,15 +153,21 @@ component App
   state skips = 0
   state autoLeft = 0
   state triedFallback = false
+  state reconnectTry = 0
+  state tuneSlow = false
+  state toastAct = ""
+  state sheetFocusId = ""
   state regionKeys: string[] = ["asia", "europe", "africa", "americas", "oceania"]
   state genreKeys: string[] = ["all", "pop", "jazz", "classical", "rock", "electronic", "news", "folk"]
   state nowMs = 0
 
   resource time = exactTime() as shape Time else empty()
+  resource media = exactViewport() as shape Media else empty()
 
   derive epoch = time.epochAtZero + nowMs
   derive isZh = time.resolvedLocale.startsWith("zh")
   derive localeName = t("app-name")
+  derive still = media.prefersReducedMotion
 
   task tick mount
     every(60000, step)
@@ -156,12 +189,14 @@ component App
   derive notPlaying = not playing
   derive isFav = saved(favs, currentId)
   derive lampOn = playing and not busy
-  derive lampColor = lampOn ? "brand" : busy or buffering ? "amber" : "lampIdle"
+  derive lampColor = lampOn ? "brand" : busy or buffering or status == "reconnecting" ? "amber" : "lampIdle"
   derive lampGlow = lampOn ? "0 0 10px #FF5A36" : "none"
   derive statusLabel = (busy
     ? t("status-tuning")
     : not hasCurrent
     ? t("status-standby")
+    : status == "reconnecting"
+    ? t("status-reconnecting")
     : status == "loading"
     ? t("status-buffering")
     : not wantPlay
@@ -170,17 +205,23 @@ component App
     ? t("status-off-air")
     : t("status-on-air"))
   derive needleVal = busy ? sweepVal : posOf(curFreq)
-  derive targetVal = (match first(picked) { case some(p) => p.rev == dialRev ? posOf(p.station.frequency) : needleFrom, case none => needleFrom })
-  derive tp = jitterIdx >= 13 ? 1.0 : jitterIdx / 13.0
+  derive targetVal = (match first(picked) { case some(p) => p.rev == dialRev ? (match p.station { case some(s) => posOf(s.frequency), case none => needleFrom }) : needleFrom, case none => needleFrom })
+  // Reduced motion: skip the jitter sweep, the needle snaps to its target.
+  derive tp = still ? 1.0 : jitterIdx >= 13 ? 1.0 : jitterIdx / 13.0
   derive sweepVal = needleFrom + (targetVal - needleFrom) * (1 + 2.70158 * (tp - 1) * (tp - 1) * (tp - 1) + 1.70158 * (tp - 1) * (tp - 1))
   derive needleLeft = pct(needleVal < 0 ? 0 : needleVal > 1 ? 1 : needleVal)
   derive freqLabel = (busy ? 87.5 + needleVal * 20.5 : curFreq).toFixed(1)
   derive titleText = busy ? t("status-tuning") : hasCurrent ? curName : t("status-empty-title")
   derive subText = busy ? t("sub-tuning") : hasCurrent ? curTagline : t("sub-empty")
-  derive hintText = busy ? t("hint-busy") : hasCurrent ? t("hint-playing") : t("hint-empty")
+  derive hintText = busy ? (tuneSlow ? t("hint-slow") : t("hint-busy")) : hasCurrent ? t("hint-playing") : t("hint-empty")
   derive shuffleLabel = busy ? t("shuffle-busy") : t("shuffle")
   derive filterLabel = ((regions.length == 0 ? t("filter-world") : regions.map((r) => regionName(r)).join(t("sep")))
     + (genre == "all" ? "" : ` · ${genreName(genre)}`))
+  // Focus stops inside the filter sheet, in DOM order, for the Tab cycle.
+  derive sheetStops = (["sheet-cancel", "region-all"]
+    .concat(regionKeys.map((k) => `region-${k}`))
+    .concat(genreKeys.map((k) => `genre-${k}`))
+    .concat(["apply-sheet"]))
   derive pickedRev = match first(picked) { case some(p) => p.rev, case none => -1 }
   derive failedPlayer = status == "failed" and skips == 0
   derive errorHint = (errorCode == "network"
@@ -210,8 +251,14 @@ component App
     after(1400, lockIn)
   task gaveUp when tuning and dialRev > 0 and picked.length == 0 and not pending(picked)
     after(4000, stopTuning)
-  task toastBye when toastOn
+  task toastBye when toastOn and toastAct == ""
     after(2600, clearToast)
+  task toastByeAct when toastOn and toastAct != ""
+    after(8000, clearToast)
+  task reconnect when status == "reconnecting" and wantPlay
+    after(1500, tryReconnect)
+  task tuneSlowHint when tuning and not tuneSlow
+    after(5000, markTuneSlow)
   task restore when not restored and recent.length > 0
     after(1, restoreLast)
   task skipOn when status == "failed" and skips > 0
@@ -227,16 +274,34 @@ component App
   action selectTab(name: string)
     nav = select(nav, name)
 
+  action goRadio
+    nav = select(nav, "radio")
+    // fulfill the "go listen" promise: land on radio and start a sweep
+    tune()
+
   action follow(target: string)
     nav = go(nav, target)
 
   action showToast(msg: string)
     toastText = msg
+    toastAct = ""
     toastOn = true
+
+  action showActionToast(msg: string)
+    // A toast the user can tap to retry what failed it.
+    toastText = msg
+    toastAct = "retune"
+    toastOn = true
+
+  action tapToast
+    if toastAct == "retune"
+      clearToast()
+      tune()
 
   action clearToast
     toastOn = false
     toastText = ""
+    toastAct = ""
 
   action applyPrefs
     if prefs.regions.length > 0
@@ -247,11 +312,13 @@ component App
       draftGenre = prefs.genre
 
   action tune
-    if not busy
-      tuning = true
-      jitterIdx = 0
-      needleFrom = posOf(curFreq)
-      dialRev = dialRev + 1
+    // Interruptible: pressing shuffle again mid-scan restarts the sweep
+    // from wherever the needle currently is.
+    tuning = true
+    jitterIdx = 0
+    needleFrom = needleVal
+    dialRev = dialRev + 1
+    tuneSlow = false
 
   action jitterTick
     jitterIdx = jitterIdx + 1
@@ -261,14 +328,25 @@ component App
       case some(p)
         if p.rev == dialRev
           tuning = false
-          play(p.station)
+          match p.station
+            case some(s)
+              play(s)
+              if p.note == "relaxed"
+                showToast(t("toast-relaxed"))
+            case none
+              // The sweep answered without a station: say what happened
+              // instead of leaving the dial silent about it.
+              if p.note == "offline"
+                showActionToast(t("toast-network"))
+              else if p.note == "empty"
+                showToast(t("toast-empty"))
       case none
         tuning = false
 
   action stopTuning
     if tuning
       tuning = false
-      showToast(t("toast-network"))
+      showActionToast(t("toast-network"))
 
   action start(s: Station)
     current = some(s)
@@ -276,6 +354,7 @@ component App
     status = "loading"
     errorCode = ""
     triedFallback = false
+    reconnectTry = 0
     send logged = pushRecent(s, epoch)
 
   action play(s: Station)
@@ -284,21 +363,63 @@ component App
     autoLeft = 2
 
   action togglePlay
-    if not busy
-      if status == "failed"
-        retry()
-      else if not hasCurrent
-        tune()
-      else
-        wantPlay = not wantPlay
+    if busy
+      // Busy: pressing play again re-tunes immediately (interrupt the scan).
+      tune()
+    else if status == "failed"
+      retry()
+    else if status == "reconnecting"
+      // Un-pause during a reconnect: resume the attempt right away.
+      wantPlay = true
+      load("player")
+    else if not hasCurrent
+      tune()
+    else
+      wantPlay = not wantPlay
 
   action started
+    // A remote play (lock screen, headset) mirrors back into our state.
+    wantPlay = true
     status = "playing"
     errorCode = ""
     skips = 0
+    reconnectTry = 0
 
-  action pausedNow
+  action hostPaused
+    // The element paused because the system or UI asked it to — including
+    // our own bound paused. Keep wantPlay honest so the binding agrees.
+    wantPlay = false
     status = "paused"
+
+  action bufferNow
+    // waiting: playback wants data. Only meaningful while we expect audio.
+    if wantPlay and status != "reconnecting"
+      status = "loading"
+
+  action streamEnded
+    // A live stream never ends on its own: ended mid-play means the stream
+    // dropped. Distinguish that from the user's own pause.
+    if wantPlay
+      status = "reconnecting"
+    else
+      status = "paused"
+
+  action tryReconnect
+    if status == "reconnecting" and wantPlay
+      if reconnectTry >= 3
+        status = "failed"
+        errorCode = "network"
+      else
+        reconnectTry = reconnectTry + 1
+        // paused is bound to wantPlay; load() restarts the source and plays.
+        load("player")
+
+  action nextTrack
+    // "Skip" from a headset or the system media controls.
+    tune()
+
+  action markTuneSlow
+    tuneSlow = true
 
   action failed(code: string)
     let fallbackReady = match current { case some(s) => (not triedFallback) and s.fallback != "", case none => false }
@@ -321,6 +442,9 @@ component App
     status = "loading"
     wantPlay = true
     triedFallback = false
+    reconnectTry = 0
+    // An element in the error state needs a fresh load to retry its source.
+    load("player")
 
   action toggleFav
     if not hasCurrent
@@ -344,9 +468,17 @@ component App
     draftRegions = regions
     draftGenre = genre
     sheetOpen = true
+    sheetFocusId = ""
+    focus("region-all")
+
+  action cancelSheet
+    // A real way out: drop the draft and put focus back where you came from.
+    sheetOpen = false
+    focus("open-filter")
 
   action closeSheet
     sheetOpen = false
+    focus("open-filter")
     // Dismissing the sheet (scrim tap) keeps the choices you made — the
     // chips must not snap back to the previous filter state. Say so: the
     // commit is silent otherwise, and the next shuffle changes underfoot.
@@ -356,6 +488,25 @@ component App
     send savedPrefs = savePrefs(draftRegions, draftGenre)
     if changed
       showToast(t("toast-sheet-applied"))
+
+  action sheetFocus(e: FocusEvent)
+    sheetFocusId = e.target
+
+  action sheetKeys(k: string, e: KeyboardEvent)
+    if sheetOpen
+      if k == "Escape"
+        preventDefault()
+        cancelSheet()
+      else if k == "Tab"
+        preventDefault()
+        let base = sheetStops.indexOf(sheetFocusId)
+        let here = base < 0 ? 0 : base
+        let dirn = e.shiftKey ? -1 : 1
+        let idx = (here + dirn + sheetStops.length) % sheetStops.length
+        match sheetStops.at(idx)
+          case some(id)
+            focus(id)
+          case none
 
   action flipAllRegions
     draftRegions = []
@@ -368,6 +519,7 @@ component App
 
   action applySheet
     sheetOpen = false
+    focus("open-filter")
     let nextRegions = draftRegions
     let nextGenre = draftGenre
     regions = nextRegions
@@ -388,22 +540,24 @@ component App
   view
     main testId="app" viewport-fit="cover" width="100%" height="100%" max-width="560px" margin="0 auto"
       display="flex" flex-direction="column"
-      navigationKey=`${cur.id}` navigate=follow
+      navigationKey=`${cur.id}` navigate=follow keycapture=sheetKeys
 
       if hasCurrent
         match current
           case some(s)
-            audio src=curStream paused=(not wantPlay)
+            audio id="player" testId="player" src=curStream paused=(not wantPlay)
               metadata=MediaMetadata(title=s.name, artist=s.tagline, album=localeName, artwork=s.favicon)
-              play=started playing=started pause=pausedNow ended=pausedNow
+              play=started playing=started pause=hostPaused ended=streamEnded waiting=bufferNow
+              nexttrack=nextTrack
               error=failed
           case none
             view width=0 height=0
 
-      view flex=1 min-height=0 position="relative" display="flex" testId="panels"
+      view flex=1 min-height=0 min-width=0 position="relative" display="flex" testId="panels"
         for t in nav.tabs key=t.name
-          view role="tabpanel" id=`panel-${t.name}` flex=1 min-height=0
+          view role="tabpanel" id=`panel-${t.name}` flex=1 min-height=0 min-width=0 overflow="hidden"
             display=(nav.tab == t.name ? "flex" : "none")
+            animation=(still ? "none" : "panelIn 240ms ease both")
             for e in t.stack key=e.id
               column navigationKey=`${e.id}` navigationScroll=`content-${e.id}` position="absolute" inset=0
                 display="flex" flex-direction="column" width="100%"
@@ -415,7 +569,7 @@ component App
                       row align-items="center" gap=8
                         view width=12 height=12 border-radius=6 background-color="brand"
                         text localeName font-size="min(-exact-title3, 21px)" font-weight=700 testId="locale-title"
-                      button -exact-press-scale=0.96 press=openSheet testId="open-filter" appearance="none" padding=0
+                      button id="open-filter" -exact-press-scale=0.96 press=openSheet testId="open-filter" appearance="none" padding=0
                         row align-items="center" gap=6 height=36 padding="0 14px" border-radius=18
                           border="1.5px solid ink" background-color="transparent"
                           text filterLabel font-size="min(-exact-footnote, 13px)" font-weight=500 color="ink" testId="filter-label"
@@ -442,8 +596,8 @@ component App
                         row align-items="center" justify-content="space-between" font-size="0.75rem" color="creamMut"
                           row align-items="center" gap=8
                             view width=8 height=8 border-radius=4 background-color=lampColor
-                              box-shadow=lampGlow testId="lamp" animation=(busy or buffering ? "pulse 1s ease-in-out infinite" : "none")
-                            text statusLabel font-size="min(-exact-caption1, 12px)" testId="status-label"
+                              box-shadow=lampGlow testId="lamp" animation=(still ? "none" : busy or buffering ? "pulse 1s ease-in-out infinite" : "none")
+                            text statusLabel font-size="min(-exact-caption1, 12px)" testId="status-label" aria-live="polite"
                           text `FM ${freqLabel}` font-size="min(-exact-caption1, 12px)" testId="freq-label"
                         text titleText font-size="min(-exact-title1, 26px)" font-weight=600 line-height=1.15 color="creamText"
                           line-clamp=2 min-height=60 testId="now-title"
@@ -455,26 +609,31 @@ component App
                             view height=3 border-radius=2 background-color="grille"
 
                     row align-items="center" justify-content="space-between" padding="4px 14px 0"
-                      button -exact-press-scale=0.96 press=toggleFav testId="fav-button" appearance="none" padding=0 background-color="transparent" aria-label=t("fav-aria") aria-pressed=isFav disabled=busy opacity=(busy ? 0.45 : 1)
+                      button -exact-press-scale=0.96 press=toggleFav testId="fav-button" appearance="none" padding=0 background-color="transparent" aria-label=t("fav-aria") aria-pressed=isFav
                         view width=56 height=56 border-radius=28 display="flex" align-items="center" justify-content="center"
                           border="1.5px solid ink" background-color="transparent"
                           text (isFav ? "♥" : "♡") font-size="min(-exact-title2, 24px)" line-height=1.2 color=(isFav ? "brandDeep" : "ink")
-                      button -exact-press-scale=0.96 press=tune testId="shuffle" appearance="none" padding=0 background-color="transparent" aria-label=t("shuffle-aria")
+                            transition=(still ? "none" : "color 180ms ease")
+                            animation=(still ? "none" : isFav ? "heartOn 200ms ease both" : "heartOff 200ms ease both")
+                      button -exact-press-scale=0.96 press=tune testId="shuffle" appearance="none" padding=0 background-color="transparent" aria-label=t("shuffle-aria") aria-keyshortcuts="ArrowRight"
                         column width=118 height=118 border-radius=59 align-items="center" justify-content="center"
                           background-color="brand" box-shadow="0 7px 0 #C2401F,0 16px 26px rgba(58,41,30,.22)"
+                          transition=(still ? "none" : "box-shadow 150ms ease")
                           text shuffleLabel font-size="min(-exact-title3, 20px)" font-weight=700 color="brandInk"
-                      button -exact-press-scale=0.96 press=togglePlay testId="play-toggle" appearance="none" padding=0 background-color="transparent" aria-label=t("play-pause-aria") disabled=busy opacity=(busy ? 0.45 : 1)
+                      button -exact-press-scale=0.96 press=togglePlay testId="play-toggle" appearance="none" padding=0 background-color="transparent"
+                        aria-label=(wantPlay ? t("pause-aria") : t("play-aria")) aria-keyshortcuts="Space" opacity=(busy ? 0.85 : 1)
                         view width=56 height=56 border-radius=28 display="flex" align-items="center" justify-content="center"
                           background-color=(busy ? "card" : "toastDark")
+                          transition=(still ? "none" : "background-color 180ms ease")
                           if busy or buffering
                             image "symbol:circle" width=20 height=20 color="amber"
-                              animation="pulse 1s ease-in-out infinite"
+                              animation=(still ? "none" : "pulse 1s ease-in-out infinite")
                           else if wantPlay
-                            row gap=5
+                            row gap=5 animation=(still ? "none" : "iconIn 180ms ease both")
                               view width=5 height=18 border-radius=1.5 background-color="iconCream"
                               view width=5 height=18 border-radius=1.5 background-color="iconCream"
                           else
-                            view width=17 height=20 margin-left=4 background-color="iconCream"
+                            view width=17 height=20 margin-left=4 background-color="iconCream" animation=(still ? "none" : "iconIn 180ms ease both")
                               clip-path="polygon(0 0,100% 50%,0 100%)"
 
                     text hintText font-size="0.8125rem" color="muted" text-align="center" margin-top=2 testId="hint"
@@ -484,16 +643,16 @@ component App
                         for tg in curTags key=tg
                           view min-height=30 padding="0 12px" border-radius=15 display="flex" align-items="center" justify-content="center" background-color="chipBg"
                             text `#${tg}` font-size="min(-exact-caption1, 12.5px)" color="chipText"
-                        if curLon != 0
+                        if playing and curLon != 0
                           view min-height=30 padding="0 12px" border-radius=15 display="flex" align-items="center" justify-content="center" background-color="chipBg"
                             text t("local-time", part = (timeChip.part == "dawn" ? t("part-dawn") : timeChip.part == "morning" ? t("part-morning") : timeChip.part == "noon" ? t("part-noon") : timeChip.part == "afternoon" ? t("part-afternoon") : t("part-evening")), time = timeChip.time) font-size="min(-exact-caption1, 12.5px)" color="chipText"
 
                     if failedPlayer
-                      row align-items="center" gap=8 padding="0 8px" testId="player-error"
+                      row role="alert" align-items="center" flex-wrap="wrap" gap=8 padding="0 8px" testId="player-error"
                         image "symbol:alert" width="1rem" height="1rem" color="brandDeep"
-                        text errorHint font-size="0.8125rem" color="brandDeep" flex=1
-                        button -exact-press-scale=0.96 press=retry testId="player-retry" t("retry")
-                        button -exact-press-scale=0.96 press=tune testId="player-next" t("next")
+                        text errorHint font-size="0.8125rem" color="brandDeep" flex=1 min-width=0
+                        button -exact-press-scale=0.96 press=retry testId="player-retry" t("retry") font-size="min(-exact-subheadline, 15px)"
+                        button -exact-press-scale=0.96 press=tune testId="player-next" t("next") font-size="min(-exact-subheadline, 15px)"
 
               else if e.name == "favorites"
                 scroll flex=1 min-height=0
@@ -508,7 +667,7 @@ component App
                         text t("favs-empty-title") font-size="1.0625rem" font-weight=600
                         text t("favs-empty-body")
                           font-size="0.875rem" color="muted" text-align="center" line-height=1.5
-                        button -exact-press-scale=0.96 press=selectTab("radio") testId="empty-go-radio" appearance="none" padding=0
+                        button -exact-press-scale=0.96 press=goRadio testId="empty-go-radio" appearance="none" padding=0
                           view min-height=44 padding="0 22px" border-radius=22 display="flex" align-items="center" justify-content="center"
                             background-color="ink"
                             text t("favs-go") font-size="0.875rem" font-weight=600 color="paper"
@@ -537,6 +696,7 @@ component App
                   column gap=20 padding=`calc(6px + var(--exact-safe-area-inset-top)) 20px 24px`
                     text t("tab-footprint") font-size="1.875rem" font-weight=700 testId="title-history"
                     column border-radius=24 background-color="card" padding="20px 22px" testId="foot-stats"
+                      box-shadow="0 8px 18px rgba(58,41,30,.12)"
                       row gap=12
                         column flex=1 gap=2
                           text foot.countryCount.toFixed(0) font-size="3rem" font-weight=700 line-height=1.3 color="amber"
@@ -561,13 +721,18 @@ component App
                         for r in foot.recent.slice(0, 12) key=r.station.id
                           row -exact-press-scale=0.96 press=play(r.station) testId=`recent-${r.station.id}` gap=12 align-items="center"
                             padding="12px 16px" border-radius=18 background-color="panel"
+                            box-shadow="0 1px 0 rgba(58,41,30,.06)"
                             column flex=1 min-width=0 gap=3
                               text r.station.name font-size="0.9375rem" font-weight=600 line-clamp=1
                               text r.place font-size="0.78125rem" color="muted" line-clamp=1
                             text agoLabel(r.agoKind, r.agoN) font-size="0.75rem" color="muted"
 
+        view position="absolute" left=0 right=0 bottom=0 height=26 background-color="paper" inert=true testId="tab-edge-fade"
+          mask-image="linear-gradient(to top, rgba(0,0,0,.85), rgba(0,0,0,0))"
+
       row role="tablist" testId="tabs" flex=0 accent-color="brand"
-        padding=`8px 18px max(26px, var(--exact-safe-area-inset-bottom))` border-top-color="hairline" border-top-style="solid" border-top-width="1px" background-color="paper"
+        padding=`8px 18px max(26px, var(--exact-safe-area-inset-bottom))`
+        background-color=`light-dark(rgba(244,236,223,.92), rgba(27,20,16,.92))`
         for t in nav.tabs key=t.name
           button role="tab" -exact-press-scale=0.96 press=selectTab(t.name) testId=`tab-${t.name}` aria-controls=`panel-${t.name}`
             aria-selected=(nav.tab == t.name) appearance="none" flex=1 min-height=0 padding=0
@@ -579,30 +744,50 @@ component App
 
       if toastOn
         row position="absolute" top=`calc(10px + var(--exact-safe-area-inset-top))` left=20 right=20 justify-content="center" testId="toast" aria-live="polite"
-          view padding="11px 16px" border-radius=14 background-color="toastDark" max-width=320
-            box-shadow="0 8px 20px rgba(42,29,21,.3)"
-            text toastText font-size="min(-exact-footnote, 13.5px)" color="iconCream" text-align="center"
+          animation=(still ? "none" : "toastIn 260ms ease both")
+          -exact-exit-animation=(still ? "none" : "toastOut 200ms ease-in both")
+          if toastAct == "retune"
+            button -exact-press-scale=0.97 press=tapToast testId="toast-act" appearance="none" padding=0 background-color="transparent"
+              view padding="11px 16px" border-radius=14 background-color="toastDark" max-width=340
+                box-shadow="0 8px 20px rgba(42,29,21,.3)" border-width=1.5 border-style="solid"
+                border-color=`light-dark(rgba(150,80,20,.55), rgba(255,190,120,.6))`
+                column gap=3 align-items="center"
+                  text toastText font-size="min(-exact-footnote, 13.5px)" color="iconCream" text-align="center"
+                  text t("toast-tap-retry") font-size="min(-exact-caption2, 11px)" font-weight=600 color="amber" text-align="center"
+          else
+            view padding="11px 16px" border-radius=14 background-color="toastDark" max-width=320
+              box-shadow="0 8px 20px rgba(42,29,21,.3)"
+              text toastText font-size="min(-exact-footnote, 13.5px)" color="iconCream" text-align="center"
 
       if sheetOpen
         view position="absolute" inset=0 -exact-press-opacity=0.75 press=closeSheet testId="sheet-scrim"
           background-color=`light-dark(rgba(42,29,21,.42), rgba(0,0,0,.55))`
+          animation=(still ? "none" : "scrimIn 220ms ease both")
+          -exact-exit-animation=(still ? "none" : "scrimOut 180ms ease-in both")
           view position="absolute" left=0 top=0 width="100%" height=60 -exact-press-opacity=0.75 press=closeSheet testId="sheet-scrim-top" appearance="none"
-        column position="absolute" left=0 right=0 bottom=0 -exact-press-opacity=0.75 press=noop testId="filter-sheet"
+        column position="absolute" left=0 right=0 bottom=0 -exact-press-opacity=0.75 press=noop testId="filter-sheet" aria-modal=true focusin=sheetFocus
           background-color="paper" border-top-left-radius=30 border-top-right-radius=30
           padding="12px 22px 34px" gap=20 box-shadow="0 -10px 30px rgba(42,29,21,.2)"
+          animation=(still ? "none" : "sheetUp 320ms cubic-bezier(.32,.72,.33,1) both")
+          -exact-exit-animation=(still ? "none" : "sheetDown 240ms ease-in both")
           view width=40 height=5 border-radius=3 background-color="dash" align-self="center"
-          column gap=4
-            text t("sheet-title") font-size="1.375rem" font-weight=700 testId="sheet-title"
-            text t("sheet-sub") font-size="0.875rem" color="muted"
+          row align-items="flex-start" justify-content="space-between"
+            column gap=4
+              text t("sheet-title") font-size="min(-exact-title2, 22px)" font-weight=700 testId="sheet-title"
+              text t("sheet-sub") font-size="min(-exact-subheadline, 14px)" color="muted"
+            button id="sheet-cancel" -exact-press-scale=0.96 press=cancelSheet testId="sheet-cancel" appearance="none" padding=0 background-color="transparent" aria-label=t("cancel")
+              view min-height=36 padding="0 14px" border-radius=18 display="flex" align-items="center" justify-content="center"
+                border="1.5px solid ink" background-color="transparent"
+                text t("cancel") font-size="min(-exact-subheadline, 14px)" font-weight=500 color="ink"
           column gap=10
             text t("sheet-regions") font-size="0.6875rem" color="muted"
             row flex-wrap="wrap" gap=8
-              button -exact-press-scale=0.96 press=flipAllRegions testId="region-all" appearance="none" padding=0 aria-pressed=(draftRegions.length == 0)
+              button id="region-all" -exact-press-scale=0.96 press=flipAllRegions testId="region-all" appearance="none" padding=0 aria-pressed=(draftRegions.length == 0)
                 view min-height=40 padding="0 16px" border-radius=20 display="flex" align-items="center" justify-content="center"
                   border="1.5px solid ink" background-color=chipOn(draftRegions.length == 0)
                   text t("filter-world") font-size="min(-exact-subheadline, 14px)" font-weight=500 color=chipFg(draftRegions.length == 0)
               for k in regionKeys key=k
-                button -exact-press-scale=0.96 press=flipRegion(k) testId=`region-${k}` appearance="none" padding=0 aria-pressed=draftRegions.includes(k)
+                button id=`region-${k}` -exact-press-scale=0.96 press=flipRegion(k) testId=`region-${k}` appearance="none" padding=0 aria-pressed=draftRegions.includes(k)
                   view min-height=40 padding="0 16px" border-radius=20 display="flex" align-items="center" justify-content="center"
                     border="1.5px solid ink" background-color=chipOn(draftRegions.includes(k))
                     text regionName(k) font-size="min(-exact-subheadline, 14px)" font-weight=500 color=chipFg(draftRegions.includes(k))
@@ -610,11 +795,12 @@ component App
             text t("sheet-genre") font-size="0.6875rem" color="muted"
             row flex-wrap="wrap" gap=8
               for k in genreKeys key=k
-                button -exact-press-scale=0.96 press=setGenre(k) testId=`genre-${k}` appearance="none" padding=0 aria-pressed=(draftGenre == k)
+                button id=`genre-${k}` -exact-press-scale=0.96 press=setGenre(k) testId=`genre-${k}` appearance="none" padding=0 aria-pressed=(draftGenre == k)
                   view min-height=40 padding="0 16px" border-radius=20 display="flex" align-items="center" justify-content="center"
                     border="1.5px solid ink" background-color=chipOn(draftGenre == k)
                     text genreName(k) font-size="min(-exact-subheadline, 14px)" font-weight=500 color=chipFg(draftGenre == k)
-          button -exact-press-scale=0.96 press=applySheet testId="apply-sheet" appearance="none" padding=0
+          button id="apply-sheet" -exact-press-scale=0.96 press=applySheet testId="apply-sheet" appearance="none" padding=0
             view min-height=54 border-radius=27 display="flex" align-items="center" justify-content="center"
-              background-color="brand" box-shadow="0 4px 0 #C2401F"
+              background-color="brand" box-shadow="0 4px 0 #C2401F,0 10px 18px rgba(58,41,30,.18)"
+              transition=(still ? "none" : "box-shadow 150ms ease")
               text t("sheet-apply") font-size="min(-exact-callout, 16px)" font-weight=700 color="brandInk"
